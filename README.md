@@ -99,7 +99,7 @@ In subjects with complete data for proteomics, DNAme, and PRS:
 │   ├── 21_protein_interactions_and_mediation.Rmd
 │   ├── 30_prs_associations_and_modeling.Rmd
 │   └── 40_multiomic_integration_and_final_analyses.Rmd
-├── WES_pipeline/            # Bash + SLURM scripts for WES preprocessing
+├── WES_pipeline/            
 │   ├── 00_download_fastq.sh
 │   ├── 01_fix_sample_names_and_paths.sh
 │   ├── 02_merge_lanes_fastq.sh
@@ -130,7 +130,7 @@ In subjects with complete data for proteomics, DNAme, and PRS:
 │   ├── 27_snpsift_annot_and_genesets.slurm
 │   ├── 28_bgzip_and_tabix_vcfs.sh
 │   ├── 29_merge_sample_vcfs.sh
-│   └── readme_WES_pipeline.md            # Notes on what was used / not used in the final paper
+│   └── readme_WES_pipeline.md            
 ├── config/
 │   ├── sample_manifest.csv  # Sample IDs, APOE genotype, AD status, etc.
 │   ├── proteomics_featureset.csv
