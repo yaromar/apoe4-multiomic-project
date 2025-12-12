@@ -1,319 +1,276 @@
+# =============================================================================
 # 01_pheno_exploration_and_heatmaps.R
-# Purpose:
-#   Build a merged phenotype + molecular table across brain regions (PFC/CBM/ST),
-#   then compute pairwise association strengths and display an interactive clustered heatmap.
+# Yaro
+# last update: 12/6/23
 #
-# Notes:
-#   - This is EDA only (not for inference).
-#   - Associations are standardized to [-1, 1] where possible.
-#   - Categorical / continuous associations use a correlation-ratio style metric (eta),
-#     mapped to [-1, 1] by applying sign = sign(Spearman on numeric-coded groups) when feasible.
+# PURPOSE
+# -------
+# This script merges several phenotype/omics-derived summary tables across 3 brain
+# regions (PFC, CBM, ST), including:
+#   - Stochastic epigenetic mutations (SEM) features (SEM_* tables)
+#   - DNA methylation aging clocks (DNAmAge_* tables)
+#   - Somatic mutational burden per region (somatic_* tables)
+#   - Core ROSMAP phenotypes (ROSMAP.BasicPheno)
 #
+# Then it computes a pairwise "association strength" matrix between ALL columns:
+#   - numeric vs numeric: correlation via cor() 
+#   - factor vs factor: Cramer's V of chisq.test()
+#   - mixed: correlation of as.numeric() codes 
+#
+# Finally, it hierarchically clusters the association matrix and visualizes it as an
+# interactive plotly heatmap (ggplotly over ggplot2 tiles).
 
-suppressPackageStartupMessages({
-  library(dplyr)
-  library(tidyr)
-  library(janitor)
-  library(vcd)        # assocstats for Cramer's V (optional)
-  library(plotly)
-  library(ggplot2)
-  library(reshape2)
-})
 
-# ----------------------------
-# 0) Helper functions
-# ----------------------------
+library(confintr)  # cramersv
+library(plotly)    # ggplotly
+library(ggplot2)   # heatmap base plot
+library(reshape2)  # melt
 
-# Safe Cramer's V for factor-factor
-cramers_v_safe <- function(x, y) {
-  x <- droplevels(as.factor(x))
-  y <- droplevels(as.factor(y))
-  tbl <- table(x, y)
-  # Need at least 2x2
-  if (nrow(tbl) < 2 || ncol(tbl) < 2) return(NA_real_)
-  out <- tryCatch({
-    as.numeric(assocstats(tbl)$cramer)
-  }, error = function(e) NA_real_)
-  out
+# -----------------------------------------------------------------------------
+# Small helpers 
+# -----------------------------------------------------------------------------
+
+# Lightweight wrapper so repetitive merge() calls are easier to scan.
+mmerge <- function(x, y, ...) merge(x, y, ...)
+
+# Index-based renaming
+rename_by_index <- function(df, mapping) {
+  # mapping is a named integer vector, e.g. c(meth_hypo_pfc=4, neurons_pfc=30)
+  for (nm in names(mapping)) colnames(df)[mapping[[nm]]] <- nm
+  df
 }
 
-# Correlation ratio (eta): numeric outcome explained by categorical predictor
-# Returns in [0, 1]
-eta_ratio <- function(y_numeric, x_factor) {
-  y <- y_numeric
-  x <- droplevels(as.factor(x_factor))
-  ok <- complete.cases(y, x)
-  y <- y[ok]
-  x <- x[ok]
-  if (length(y) < 3) return(NA_real_)
-  if (nlevels(x) < 2) return(NA_real_)
-
-  grand_mean <- mean(y)
-  ss_between <- sum(tapply(y, x, function(v) length(v) * (mean(v) - grand_mean)^2))
-  ss_total <- sum((y - grand_mean)^2)
-  if (ss_total == 0) return(NA_real_)
-  sqrt(ss_between / ss_total)
+# Association function
+assoc_value <- function(x, y) {
+  if (is.numeric(x) && is.numeric(y)) {
+    cor(x, y, use = "complete.obs")
+  } else if (is.factor(x) && is.factor(y)) {
+    cramersv(chisq.test(x, y))
+  } else {
+    #  mixed types -> cor(as.numeric(x), as.numeric(y))
+    cor(as.numeric(x), as.numeric(y), use = "complete.obs")
+  }
 }
 
-# Signed eta: eta in [0,1] plus a sign heuristic to map to [-1,1]
-# For multi-level factors, sign is not inherently defined; we approximate using Spearman
-# between y and ordered group means (works best if factor levels have ordinal meaning).
-signed_eta <- function(y_numeric, x_factor) {
-  eta <- eta_ratio(y_numeric, x_factor)
-  if (is.na(eta)) return(NA_real_)
+# -----------------------------------------------------------------------------
+# Column selection for DNAmAge_pfc merge
+# -----------------------------------------------------------------------------
 
-  # sign heuristic: order levels by mean(y) and correlate with those ordered means
-  x <- droplevels(as.factor(x_factor))
-  ok <- complete.cases(y_numeric, x)
-  y <- y_numeric[ok]
-  x <- x[ok]
+dnamage_pfc_cols <- c(
+  "PCPhenoAge", "dunedinPoAm_git", "DNAmClockCortical", "Horvath1",
+  "projid", "Age", "Female", "pmi", "study", "gpath",
+  "plaq_d", "plaq_n", "nft", "count", "amyloid",
+  "cognep_random_slope", "cogng_random_slope", "cognpo_random_slope",
+  "cognps_random_slope", "cognse_random_slope", "cognwo_random_slope",
+  "tangles", "neurons",
+  "ca1hipdp", "entodp", "infpardp", "midfrontdp", "midtempdp",
+  "ca1hipnp", "entonp", "infparnp", "midfrontnp", "midtempnp",
+  "ca1hipnft", "entonft", "infparnft", "midfrontnft", "midtempnft",
+  "amyloid_ag", "amyloid_calc", "amyloid_cg", "amyloid_ec", "amyloid_hip",
+  "amyloid_it", "amyloid_mf", "amyloid_mt", "amyloid_sf",
+  "tangles_ag", "tangles_calc", "tangles_cg", "tangles_ec",
+  "tangles_hip", "tangles_it", "tangles_mf", "tangles_mt",
+  "ci_num2_gct", "ci_num2_mct",
+  "AD_Reagan", "ceradsc", "tdp_stage4", "apoe_genotype", "apoe_long",
+  "tomm40_hap", "age_first_ad_dx", "age_first_dem_dx", "cogdx",
+  "braaksc", "caa_4gp", "AD_Clinical"
+)
 
-  means <- tapply(y, x, mean)
-  # Map each sample to its group's mean and correlate with y
-  yhat <- means[as.character(x)]
-  s <- suppressWarnings(cor(y, yhat, method = "spearman"))
-  if (is.na(s)) s <- 1
-  sign(s) * eta
-}
+# =============================================================================
+# CLEANING / MERGING PFC
+# =============================================================================
 
-# Spearman correlation for numeric-numeric
-spearman_safe <- function(x, y) {
-  out <- suppressWarnings(cor(x, y, method = "spearman", use = "pairwise.complete.obs"))
-  as.numeric(out)
-}
+# Merge SEM_pfc_1 with selected DNAmAge_pfc columns by projid
+big_pheno <- mmerge(SEM_pfc_1, DNAmAge_pfc[dnamage_pfc_cols], by = "projid")
 
-# Utility: scale numeric columns only
-scale_numeric_cols <- function(df) {
-  num_cols <- names(df)[vapply(df, is.numeric, logical(1))]
-  df %>% mutate(across(all_of(num_cols), ~ as.numeric(scale(.x))))
-}
+# Add SEM_pfc_2 and SEM_pfc_3 (in that order)
+big_pheno <- mmerge(SEM_pfc_2, big_pheno, by = "projid")
+big_pheno <- mmerge(SEM_pfc_3, big_pheno, by = "projid")
 
-# ----------------------------
-# 1) Standardize/clean inputs
-# ----------------------------
+# Region-specific SEM-derived summary features
+big_pheno$sum_hypo_pfc  <- big_pheno$unmeth_hypo  + big_pheno$mid_hypo  + big_pheno$meth_hypo
+big_pheno$sum_hyper_pfc <- big_pheno$unmeth_hyper + big_pheno$mid_hyper + big_pheno$meth_hyper
 
-# Ensure consistent key naming
-# NOTE: if projid is not character everywhere, merging can silently misbehave
-as_key <- function(x) as.character(x)
+# Merge somatic burden 
+temp <- somatic_pfc[c("INDV", "N_SITES")]
+colnames(temp) <- c("projid", "mutational_burden_pfc")
+big_pheno <- mmerge(temp, big_pheno, by = "projid", all.y = TRUE)
 
-# ---- PFC core table: DNAm + metadata + clocks ----
-pfc_core <- DNAmAge_pfc %>%
-  mutate(projid = as_key(projid)) %>%
-  select(
-    projid,
-    Age, Female, pmi, study, gpath,
-    plaq_d, plaq_n, nft, count, amyloid,
-    starts_with("cogn"), tangles, neurons,
-    ca1hipdp, entodp, infpardp, midfrontdp, midtempdp,
-    ca1hipnp, entonp, infparnp, midfrontnp, midtempnp,
-    ca1hipnft, entonft, infparnft, midfrontnft, midtempnft,
-    starts_with("amyloid_"), starts_with("tangles_"),
-    ci_num2_gct, ci_num2_mct,
-    AD_Reagan, ceradsc, tdp_stage4,
-    apoe_genotype, apoe_long, tomm40_hap,
-    age_first_ad_dx, age_first_dem_dx, cogdx,
-    braaksc, caa_4gp, AD_Clinical,
-    PCPhenoAge, dunedinPoAm_git, DNAmClockCortical, Horvath1
-  ) %>%
-  rename(
-    neurons_pfc           = neurons,
-    PCPhenoAge_pfc        = PCPhenoAge,
-    dunedinPACE_pfc       = dunedinPoAm_git,
-    DNAmClockCortical_pfc = DNAmClockCortical,
-    Horvath1_pfc          = Horvath1
-  )
+# Index-based renames 
+big_pheno <- rename_by_index(big_pheno, c(
+  meth_hypo_pfc         = 4,
+  mid_hyper_pfc         = 5,
+  mid_hypo_pfc          = 6,
+  unmeth_hyper_pfc      = 7,
+  PCPhenoAge_pfc        = 9,
+  dunedinPACE_pfc       = 10,
+  DNAmClockCortical_pfc = 11,
+  Horvath1_pfc          = 12,
+  neurons_pfc           = 30
+))
 
-# ---- Somatic burden ----
-som_pfc <- somatic_pfc %>%
-  transmute(projid = as_key(INDV), mutational_burden_pfc = N_SITES)
+# Optional non-invasive guardrail: confirm those indices still exist
+stopifnot(ncol(big_pheno) >= 30)
 
-som_cbm <- somatic_cbm %>%
-  transmute(projid = as_key(INDV), mutational_burden_cbm = N_SITES)
+# =============================================================================
+# CLEANING / MERGING CBM
+# =============================================================================
 
-som_st <- somatic_st %>%
-  transmute(projid = as_key(INDV), mutational_burden_st = N_SITES)
+big_pheno <- mmerge(SEM_cbm_1, big_pheno, by = "projid")
+big_pheno <- mmerge(SEM_cbm_2, big_pheno, by = "projid")
+big_pheno <- mmerge(SEM_cbm_3, big_pheno, by = "projid")
 
-# ---- SEM helper: rename SEM columns with region suffix ----
-rename_sem <- function(df, region) {
-  df %>%
-    mutate(projid = as_key(projid)) %>%
-    rename_with(~ paste0(.x, "_", region), -projid)
-}
+big_pheno$sum_hypo_cbm  <- big_pheno$unmeth_hypo.x + big_pheno$mid_hypo  + big_pheno$meth_hypo
+big_pheno$sum_hyper_cbm <- big_pheno$unmeth_hyper  + big_pheno$mid_hyper + big_pheno$meth_hyper.x
 
-pfc_sem <- list(SEM_pfc_1, SEM_pfc_2, SEM_pfc_3) %>%
-  lapply(rename_sem, region = "pfc") %>%
-  reduce(full_join, by = "projid")
+temp <- somatic_cbm[c("INDV", "N_SITES")]
+colnames(temp) <- c("projid", "mutational_burden_cbm")
+big_pheno <- mmerge(temp, big_pheno, by = "projid", all.y = TRUE)
 
-cbm_sem <- list(SEM_cbm_1, SEM_cbm_2, SEM_cbm_3) %>%
-  lapply(rename_sem, region = "cbm") %>%
-  reduce(full_join, by = "projid")
+big_pheno <- mmerge(
+  big_pheno,
+  DNAmAge_cbm[c("neurons", "projid", "PCPhenoAge", "dunedinPoAm_git", "DNAmClockCortical", "Horvath1")],
+  by = "projid"
+)
 
-st_sem <- list(SEM_st_1, SEM_st_2, SEM_st_3) %>%
-  lapply(rename_sem, region = "st") %>%
-  reduce(full_join, by = "projid")
+big_pheno <- rename_by_index(big_pheno, c(
+  meth_hypo_cbm         = 4,
+  mid_hyper_cbm         = 5,
+  mid_hypo_cbm          = 6,
+  unmeth_hyper_cbm      = 7,
+  neurons_cbm           = 88,
+  PCPhenoAge_cbm        = 89,
+  dunedinPACE_cbm       = 90,
+  DNAmClockCortical_cbm = 91,
+  Horvath1_cbm          = 92
+))
 
-# Add SEM summaries (hypo/hyper)
-add_sem_summaries <- function(df, region) {
-  hypo_cols  <- paste0(c("unmeth_hypo", "mid_hypo", "meth_hypo"), "_", region)
-  hyper_cols <- paste0(c("unmeth_hyper", "mid_hyper", "meth_hyper"), "_", region)
+stopifnot(ncol(big_pheno) >= 92)
 
-  df %>%
-    mutate(
-      !!paste0("sum_hypo_", region)  := rowSums(across(all_of(hypo_cols)),  na.rm = TRUE),
-      !!paste0("sum_hyper_", region) := rowSums(across(all_of(hyper_cols)), na.rm = TRUE)
-    )
-}
+# =============================================================================
+# MERGE SEM ST + SOMATIC ST (then merge DNAmAge_st)
+# =============================================================================
 
-pfc_sem <- add_sem_summaries(pfc_sem, "pfc")
-cbm_sem <- add_sem_summaries(cbm_sem, "cbm")
-st_sem  <- add_sem_summaries(st_sem,  "st")
+big_pheno <- mmerge(SEM_st_1, big_pheno, by = "projid")
+big_pheno <- mmerge(SEM_st_2, big_pheno, by = "projid")
+big_pheno <- mmerge(SEM_st_3, big_pheno, by = "projid")
 
-# ---- CBM DNAm clocks ----
-cbm_core <- DNAmAge_cbm %>%
-  mutate(projid = as_key(projid)) %>%
-  select(projid, neurons, PCPhenoAge, dunedinPoAm_git, DNAmClockCortical, Horvath1) %>%
-  rename(
-    neurons_cbm           = neurons,
-    PCPhenoAge_cbm        = PCPhenoAge,
-    dunedinPACE_cbm       = dunedinPoAm_git,
-    DNAmClockCortical_cbm = DNAmClockCortical,
-    Horvath1_cbm          = Horvath1
-  )
+big_pheno$sum_hypo_st  <- big_pheno$unmeth_hypo  + big_pheno$mid_hypo  + big_pheno$meth_hypo
+big_pheno$sum_hyper_st <- big_pheno$unmeth_hyper + big_pheno$mid_hyper + big_pheno$meth_hyper
 
-# ---- ST DNAm clocks ----
-st_core <- DNAmAge_st %>%
-  mutate(projid = as_key(projid)) %>%
-  select(projid, neurons, PCPhenoAge, dunedinPoAm_git, DNAmClockCortical, Horvath1) %>%
-  rename(
-    neurons_st           = neurons,
-    PCPhenoAge_st        = PCPhenoAge,
-    dunedinPACE_st       = dunedinPoAm_git,
-    DNAmClockCortical_st = DNAmClockCortical,
-    Horvath1_st          = Horvath1
-  )
+temp <- somatic_st[c("INDV", "N_SITES")]
+colnames(temp) <- c("projid", "mutational_burden_st")
+big_pheno <- mmerge(temp, big_pheno, by = "projid", all.y = TRUE)
+rm(temp)
 
-# ---- ROSMAP basic ----
-basic <- ROSMAP.BasicPheno %>%
-  rename(projid = 1) %>%
-  mutate(projid = as_key(projid)) %>%
-  select(projid, niareagansc)
+# Merge DNAmAge_st LAST for ST region
+big_pheno <- mmerge(
+  big_pheno,
+  DNAmAge_st[c("neurons", "projid", "PCPhenoAge", "dunedinPoAm_git", "DNAmClockCortical", "Horvath1")],
+  by = "projid"
+)
 
-# ----------------------------
-# 2) Build big_pheno
-# ----------------------------
-big_pheno <- pfc_core %>%
-  full_join(pfc_sem, by = "projid") %>%
-  full_join(som_pfc, by = "projid") %>%
-  full_join(cbm_sem, by = "projid") %>%
-  full_join(som_cbm, by = "projid") %>%
-  full_join(cbm_core, by = "projid") %>%
-  full_join(st_sem, by = "projid") %>%
-  full_join(som_st, by = "projid") %>%
-  full_join(st_core, by = "projid") %>%
-  left_join(basic, by = "projid") %>%
-  clean_names()
+big_pheno <- rename_by_index(big_pheno, c(
+  meth_hypo_st         = 4,
+  mid_hyper_st         = 5,
+  mid_hypo_st          = 6,
+  unmeth_hyper_st      = 7,
+  neurons_st           = 102,
+  PCPhenoAge_st        = 103,
+  dunedinPACE_st       = 104,
+  DNAmClockCortical_st = 105,
+  Horvath1_st          = 106
+))
 
-# ----------------------------
-# 3) Derived phenotype variables
-# ----------------------------
-big_pheno <- big_pheno %>%
-  mutate(
-    niareagansc = as.factor(niareagansc),
+stopifnot(ncol(big_pheno) >= 106)
 
-    tdp_stage4_recode = case_when(
-      tdp_stage4 %in% c(0, 1) ~ FALSE,
-      tdp_stage4 %in% c(2, 3) ~ TRUE,
-      TRUE ~ NA
-    ) %>% as.factor(),
+# =============================================================================
+# CLEANING THE MERGED DATA (phenotype recodes + scaling)
+# =============================================================================
 
-    # NIA-Reagan dichotomy:
-    niareagansc_recode = case_when(
-      niareagansc %in% c(1, 2) ~ 1,
-      niareagansc %in% c(3, 4) ~ 0,
-      TRUE ~ NA_real_
-    ) %>% as.factor(),
+colnames(ROSMAP.BasicPheno)[1] <- "projid"
+big_pheno <- mmerge(big_pheno, ROSMAP.BasicPheno[c("projid", "niareagansc")], by = "projid")
+big_pheno$niareagansc <- as.factor(big_pheno$niareagansc)
 
-    length_ad = age - age_first_ad_dx,
+# Remove redundant columns created by merge suffixing 
+big_pheno <- big_pheno[, !(names(big_pheno) %in% c(
+  "meth_hyper", "unmeth_hypo",
+  "meth_hyper.x", "unmeth_hypo.x",
+  "meth_hyper.y", "unmeth_hypo.y"
+))]
 
-    # AD indicator: strict clinical+pathology
-    ad_indicator_binary = case_when(
-      cogdx == 3 & niareagansc %in% c(1, 2) ~ 1,
-      cogdx == 1 ~ 0,
-      TRUE ~ NA_real_
-    ) %>% as.factor(),
+# Recode TDP stage into binary factor 
+big_pheno$tdp_stage4_recode <- ifelse(big_pheno$tdp_stage4 %in% c(0, 1), FALSE,
+                                      ifelse(big_pheno$tdp_stage4 %in% c(2, 3), TRUE, NA))
+big_pheno$tdp_stage4_recode <- as.factor(big_pheno$tdp_stage4_recode)
 
-    # AD indicator: any cognitive impairment + pathology
-    ad_indicator_binary_anycog = case_when(
-      cogdx %in% c(2, 3) & niareagansc %in% c(1, 2) ~ 1,
-      cogdx == 1 ~ 0,
-      TRUE ~ NA_real_
-    ) %>% as.factor()
-  )
+# Recode niareagansc into binary factor 
+big_pheno$niareagansc_recode <- ifelse(big_pheno$niareagansc %in% c(1, 2), 1,
+                                       ifelse(big_pheno$niareagansc %in% c(3, 4), 0, NA))
+big_pheno$niareagansc_recode <- as.factor(big_pheno$niareagansc_recode)
 
-# ----------------------------
-# 4) Scale numeric columns for comparability (optional)
-# ----------------------------
-big_pheno_scaled <- scale_numeric_cols(big_pheno)
+# Disease duration estimate 
+big_pheno$lengthAD <- big_pheno$Age - big_pheno$age_first_ad_dx
 
-# ----------------------------
-# 5) Pairwise association matrix
-# ----------------------------
-vars <- names(big_pheno_scaled)
+# AD indicator: strict AD (clinical AD + neuropathologic AD)
+big_pheno$AD_indicator_binary <- ifelse(big_pheno$cogdx == 3 & big_pheno$niareagansc %in% c(1, 2), 1,
+                                        ifelse(big_pheno$cogdx == 1, 0, NA))
+big_pheno$AD_indicator_binary <- as.factor(big_pheno$AD_indicator_binary)
 
-assoc_matrix <- matrix(NA_real_, nrow = length(vars), ncol = length(vars),
-                       dimnames = list(vars, vars))
+# AD indicator: "any cognitive impairment" + neuropathologic AD
+big_pheno$AD_indicator_binary_anycog <- ifelse(big_pheno$cogdx %in% c(2, 3) & big_pheno$niareagansc %in% c(1, 2), 1,
+                                               ifelse(big_pheno$cogdx == 1, 0, NA))
+big_pheno$AD_indicator_binary_anycog <- as.factor(big_pheno$AD_indicator_binary_anycog)
 
-for (i in seq_along(vars)) {
-  for (j in seq_along(vars)) {
-    if (i == j) next
+# Scale numeric features only 
+numeric_columns <- colnames(big_pheno)[sapply(big_pheno, is.numeric)]
+big_pheno_scaled <- big_pheno
+big_pheno_scaled[, numeric_columns] <- scale(big_pheno[, numeric_columns])
 
-    xi <- big_pheno_scaled[[vars[i]]]
-    xj <- big_pheno_scaled[[vars[j]]]
+# =============================================================================
+# ASSOCIATION MATRIX (pairwise over all columns)
+# =============================================================================
 
-    if (is.numeric(xi) && is.numeric(xj)) {
-      assoc_matrix[i, j] <- spearman_safe(xi, xj)
+assoc_matrix <- matrix(
+  NA,
+  ncol = ncol(big_pheno_scaled),
+  nrow = ncol(big_pheno_scaled),
+  dimnames = list(names(big_pheno_scaled), names(big_pheno_scaled))
+)
 
-    } else if (is.factor(xi) && is.factor(xj)) {
-      assoc_matrix[i, j] <- cramers_v_safe(xi, xj)
-
-    } else if (is.numeric(xi) && is.factor(xj)) {
-      assoc_matrix[i, j] <- signed_eta(xi, xj)
-
-    } else if (is.factor(xi) && is.numeric(xj)) {
-      assoc_matrix[i, j] <- signed_eta(xj, xi)
-
-    } else {
-      assoc_matrix[i, j] <- NA_real_
+for (i in 1:ncol(big_pheno_scaled)) {
+  for (j in 1:ncol(big_pheno_scaled)) {
+    if (i != j) {
+      assoc_matrix[i, j] <- assoc_value(big_pheno_scaled[[i]], big_pheno_scaled[[j]])
+      print(paste(colnames(big_pheno_scaled)[i], colnames(big_pheno_scaled)[j], assoc_matrix[i, j]))
     }
   }
 }
 
-# For clustering, replace NA with 0 (EDA choice; avoids dist() errors)
-assoc_for_cluster <- assoc_matrix
-assoc_for_cluster[is.na(assoc_for_cluster)] <- 0
+# =============================================================================
+# CLUSTERING + INTERACTIVE HEATMAP
+# =============================================================================
 
-hc_rows <- hclust(dist(assoc_for_cluster))
-hc_cols <- hclust(dist(t(assoc_for_cluster)))
+hc_rows <- hclust(dist(t(assoc_matrix)))
+hc_cols <- hclust(dist(assoc_matrix))
 
 ordered_matrix <- assoc_matrix[hc_rows$order, hc_cols$order]
-
-# ----------------------------
-# 6) Plot interactive heatmap
-# ----------------------------
 assoc_long <- reshape2::melt(ordered_matrix)
 
 p <- ggplot(assoc_long, aes(Var1, Var2, fill = value)) +
   geom_tile() +
   scale_fill_gradient2(
     low = "blue", high = "red", mid = "white",
-    midpoint = 0, limits = c(-1, 1), na.value = "grey90",
+    midpoint = 0, limit = c(-1, 1), space = "Lab",
     name = "Association"
   ) +
-  theme_minimal(base_size = 10) +
+  theme_minimal() +
   theme(
     axis.text.x = element_text(angle = 45, hjust = 1),
     axis.title = element_blank()
   )
 
 interactive_heatmap <- ggplotly(p, tooltip = c("Var1", "Var2", "value"))
+
+# Launch interactive heatmap
 interactive_heatmap
