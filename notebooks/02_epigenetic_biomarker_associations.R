@@ -1,47 +1,68 @@
+# =============================================================================
+# 02_epigenetic_biomarker_associations.R
 # Yaro
 # Last update: 12/6/23
 #
-# Script Purpose:
-#   Test associations between a set of biomarkers ("clockColumns") and a set of
-#   pathology / cognitive variables ("cognitive_cols") using regression models.
-#   Save effect size + p-value for each biomarker–outcome pair and visualize
-#   the resulting association matrix as a heatmap.
+# PURPOSE
+# -------
+# Test associations between a set of epigenetic / mutational / SEM biomarkers
+# (across brain regions) and AD-related phenotypes/pathology, while adjusting
+# for covariates.
 #
 # Output:
-#   - `results_df`: long table with coefficient and p-value for each pair.
-#   - A ComplexHeatmap heatmap of coefficients (optionally masked by significance).
+#   1) A long-format results table (results_df) with one row per:
+#        biomarker (Var1) x phenotype (Var2)
+#   2) A coefficient heatmap of biomarker ~ phenotype relationships.
+#
+# IMPORTANT IMPLEMENTATION NOTES
+# ------------------------------
+# - For visualization convenience, non-significant associations are assigned
+#   Coefficient = 0 and t_Value = 0 (P_Value still recorded).
+# =============================================================================
 
-# ---- Libraries ----
-library(dplyr)          # data manipulation
-library(ggplot2)        # optional visualization (not strictly used here)
+# -----------------------------------------------------------------------------
+# Libraries
+# -----------------------------------------------------------------------------
+library(lme4)           
+library(dplyr)
+library(ordinal)        
+library(ggplot2)        
 library(ComplexHeatmap) # heatmap
 library(reshape2)       # acast
 library(circlize)       # colorRamp2
-library(ordinal)        # clm (if using ordinal outcomes)
 
-# ---- User settings ----
+# -----------------------------------------------------------------------------
+# Inputs assumed to exist in the environment
+# -----------------------------------------------------------------------------
+# big_pheno_scaled must already exist (from 01_pheno_exploration_and_heatmaps.R)
 
-# Biomarker variables to test (predictors)
+# -----------------------------------------------------------------------------
+# Biomarkers (predictors)
+# -----------------------------------------------------------------------------
 clockColumns <- c(
   "mutational_burden_st", "mutational_burden_pfc", "mutational_burden_cbm",
-  "sum_hypo_pfc", "sum_hypo_st", "sum_hypo_cbm", "sum_hyper_pfc", "sum_hyper_cbm", "sum_hyper_st",
-  "meth_hypo_pfc", "meth_hypo_cbm", "meth_hypo_st", "mid_hyper_pfc", "mid_hyper_cbm", "mid_hyper_st",
-  "mid_hypo_pfc", "mid_hypo_cbm", "mid_hypo_st", "unmeth_hyper_pfc", "unmeth_hyper_cbm", "unmeth_hyper_st",
+  "sum_hypo_pfc", "sum_hypo_st", "sum_hypo_cbm",
+  "sum_hyper_pfc", "sum_hyper_cbm", "sum_hyper_st",
+  "meth_hypo_pfc", "meth_hypo_cbm", "meth_hypo_st",
+  "mid_hyper_pfc", "mid_hyper_cbm", "mid_hyper_st",
+  "mid_hypo_pfc", "mid_hypo_cbm", "mid_hypo_st",
+  "unmeth_hyper_pfc", "unmeth_hyper_cbm", "unmeth_hyper_st",
   "PCPhenoAge_pfc", "PCPhenoAge_cbm", "PCPhenoAge_st",
-  "Horvath1_pfc", "Horvath1_cbm", "Horvath1_st", "dunedinPACE_pfc", "dunedinPACE_cbm", "dunedinPACE_st",
+  "Horvath1_pfc", "Horvath1_cbm", "Horvath1_st",
+  "dunedinPACE_pfc", "dunedinPACE_cbm", "dunedinPACE_st",
   "DNAmClockCortical_cbm", "DNAmClockCortical_pfc", "DNAmClockCortical_st"
 )
 
-# Covariates included in each model.
-# Note: this is a fixed set; if you want region-matched neuron proportion, adapt as needed.
-covariates <- c("Age", "Female", "pmi") # eg "neurons_st"
+# -----------------------------------------------------------------------------
+# Covariates
+# -----------------------------------------------------------------------------
+covariates <- c("Age", "Female", "pmi", "neurons_st")
 
-# Choose the outcome type for THIS run.
-# Valid values: "numeric", "binary", "ordinal"
-outcome_type <- "binary"
+# -----------------------------------------------------------------------------
+# Phenotypes / outcomes (choose ONE MODE explicitly)
+# -----------------------------------------------------------------------------
+MODE <- "binary"   # options: "numeric", "ordinal", "binary"
 
-# Define candidate outcomes for each type.
-# You should set `cognitive_cols` ONCE based on outcome_type.
 cognitive_cols_numeric <- c(
   "gpath",
   "plaq_d", "plaq_n", "nft", "count", "amyloid",
@@ -58,127 +79,125 @@ cognitive_cols_numeric <- c(
   "age_first_ad_dx", "age_first_dem_dx"
 )
 
-cognitive_cols_ordinal <- c("tdp_stage4", "tomm40_hap", "AD_Clinical", "cogdx", "braaksc")
-
-cognitive_cols_binary <- c("ci_num2_gct", "ci_num2_mct", "AD_Reagan", "ceradsc", "tdp_stage4_recode", "apoe_genotype")
-
-cognitive_cols <- switch(
-  outcome_type,
-  numeric = cognitive_cols_numeric,
-  binary  = cognitive_cols_binary,
-  ordinal = cognitive_cols_ordinal
+cognitive_cols_ordinal <- c(
+  "tdp_stage4", "tomm40_hap", "AD_Clinical", "cogdx", "braaksc"
 )
 
-# Significance threshold for optional masking of coefficients
-alpha <- 0.05
+cognitive_cols_binary <- c(
+  "ci_num2_gct", "ci_num2_mct",
+  "AD_Reagan", "ceradsc", "tdp_stage4_recode", "apoe_genotype"
+)
 
-# If TRUE, non-significant coefficients are replaced with 0 in the heatmap.
-# If FALSE, the true coefficients are shown regardless of significance.
-mask_nonsignificant <- TRUE
+cognitive_cols <- switch(
+  MODE,
+  numeric = cognitive_cols_numeric,
+  ordinal = cognitive_cols_ordinal,
+  binary  = cognitive_cols_binary
+)
 
+# -----------------------------------------------------------------------------
+# Basic checks (fail early if something is missing)
+# -----------------------------------------------------------------------------
+stopifnot(exists("big_pheno_scaled"))
+missing_predictors <- setdiff(clockColumns, colnames(big_pheno_scaled))
+missing_outcomes    <- setdiff(cognitive_cols, colnames(big_pheno_scaled))
+missing_covs        <- setdiff(covariates, colnames(big_pheno_scaled))
 
-# ---- Initialize results storage ----
-# We store one row per (biomarker, outcome) pair.
+if (length(missing_predictors) > 0) stop("Missing biomarker columns: ", paste(missing_predictors, collapse = ", "))
+if (length(missing_outcomes) > 0)   stop("Missing outcome columns: ", paste(missing_outcomes, collapse = ", "))
+if (length(missing_covs) > 0)       stop("Missing covariate columns: ", paste(missing_covs, collapse = ", "))
+
+# -----------------------------------------------------------------------------
+# Results container
+# -----------------------------------------------------------------------------
 results_df <- data.frame(
-  Var1 = character(),    # biomarker
-  Var2 = character(),    # outcome
+  Var1 = character(),
+  Var2 = character(),
   Coefficient = numeric(),
   P_Value = numeric(),
-  Stat = numeric(),      # t-value (lm) or z-value (glm/clm)
+  t_Value = numeric(),
   stringsAsFactors = FALSE
 )
 
-# ---- Helper function: fit model and extract coefficient/pvalue for biomarker ----
-fit_and_extract <- function(dat, outcome, biomarker, covariates, outcome_type) {
+# -----------------------------------------------------------------------------
+# Modeling loop
+# -----------------------------------------------------------------------------
+# For each biomarker (predictor), fit one model per outcome.
+# Model form:
+#   outcome ~ biomarker + covariates
+#
+# Model type depends on MODE:
+#   numeric:  lm()
+#   binary:   glm(family = binomial)   (default here matches MODE)
+#   ordinal:  clm()                    (ordinal package)
+# -----------------------------------------------------------------------------
 
-  # Build the model formula
-  formula_str <- paste(outcome, "~", biomarker, "+", paste(covariates, collapse = " + "))
-  fml <- as.formula(formula_str)
-
-  # Fit model depending on outcome type
-  if (outcome_type == "numeric") {
-    fit <- lm(fml, data = dat)
-    coefs <- summary(fit)$coefficients
-  } else if (outcome_type == "binary") {
-    fit <- glm(fml, data = dat, family = "binomial")
-    coefs <- summary(fit)$coefficients
-  } else if (outcome_type == "ordinal") {
-    # Ensure outcome is ordered
-    dat[[outcome]] <- as.ordered(dat[[outcome]])
-    fit <- clm(fml, data = dat)
-    coefs <- summary(fit)$coefficients
-  } else {
-    stop("Unknown outcome_type: ", outcome_type)
-  }
-
-  # If the biomarker term is missing (e.g., dropped due to singularity), return NA
-  if (!(biomarker %in% rownames(coefs))) {
-    return(list(beta = NA_real_, stat = NA_real_, p = NA_real_, formula = formula_str))
-  }
-
-  beta <- coefs[biomarker, 1]
-  stat <- coefs[biomarker, 3]
-  pval <- coefs[biomarker, 4]
-
-  list(beta = beta, stat = stat, p = pval, formula = formula_str)
-}
-
-
-# ---- Main loop over biomarker–outcome pairs ----
-for (bio in clockColumns) {
-  for (out in cognitive_cols) {
-
-    # Skip if columns are missing (defensive; helpful when reusing script)
-    needed <- c(bio, out, covariates)
-    if (!all(needed %in% colnames(big_pheno_scaled))) {
+for (col in clockColumns) {
+  for (compare_col in cognitive_cols) {
+    
+    formula_str <- paste(compare_col, "~", col, "+", paste(covariates, collapse = " + "))
+    print(formula_str)
+    
+    fit <- switch(
+      MODE,
+      numeric = lm(as.formula(formula_str), data = big_pheno_scaled),
+      binary  = glm(as.formula(formula_str), data = big_pheno_scaled, family = "binomial"),
+      ordinal = clm(as.formula(formula_str), data = big_pheno_scaled)
+    )
+    
+    sm <- summary(fit)
+    
+    coef_tab <- sm$coefficients
+    
+    # We expect a row named exactly like the biomarker column (col).
+    # If not found, stop immediately so we don't silently index the wrong thing.
+    if (!(col %in% rownames(coef_tab))) {
+      stop(
+        "Could not find biomarker term in coefficient table.\n",
+        "Outcome: ", compare_col, "\n",
+        "Biomarker: ", col, "\n",
+        "Available terms: ", paste(rownames(coef_tab), collapse = ", ")
+      )
+    }
+    
+    # P-value column name differs by model
+    p_col <- intersect(colnames(coef_tab), c("Pr(>|t|)", "Pr(>|z|)"))
+    if (length(p_col) != 1) {
+      stop("Could not uniquely identify p-value column in coefficients table for model: ", MODE)
+    }
+    p_col <- p_col[[1]]
+    
+    # Extract estimate / test-stat / pvalue for the biomarker term
+    est <- coef_tab[col, 1]
+    stat <- coef_tab[col, 3]
+    pval <- coef_tab[col, p_col]
+    
+    # Store results:
+    # - significant: keep estimate/stat
+    # - non-significant: store zeros for coefficient/stat (but preserve p-value)
+    if (!is.na(pval) && pval < 0.05) {
       results_df <- rbind(
         results_df,
-        data.frame(Var1 = bio, Var2 = out, Coefficient = NA_real_, P_Value = NA_real_, Stat = NA_real_)
+        data.frame(Var1 = col, Var2 = compare_col, Coefficient = est, t_Value = stat, P_Value = pval)
       )
-      next
-    }
-
-    # Fit model + extract statistics
-    res <- fit_and_extract(
-      dat = big_pheno_scaled,
-      outcome = out,
-      biomarker = bio,
-      covariates = covariates,
-      outcome_type = outcome_type
-    )
-
-    # Optionally mask non-significant coefficients
-    beta_to_store <- res$beta
-    if (mask_nonsignificant && !is.na(res$p) && res$p >= alpha) {
-      beta_to_store <- 0
-    }
-
-    results_df <- rbind(
-      results_df,
-      data.frame(
-        Var1 = bio,
-        Var2 = out,
-        Coefficient = beta_to_store,
-        P_Value = res$p,
-        Stat = res$stat,
-        stringsAsFactors = FALSE
+    } else {
+      results_df <- rbind(
+        results_df,
+        data.frame(Var1 = col, Var2 = compare_col, Coefficient = 0, t_Value = 0, P_Value = pval)
       )
-    )
+    }
   }
 }
 
-# ---- Convert results to a matrix for heatmap ----
-# Rows = biomarkers (Var1), Columns = outcomes (Var2)
+# -----------------------------------------------------------------------------
+# Heatmap construction
+# -----------------------------------------------------------------------------
 heatmap_matrix <- acast(results_df, Var1 ~ Var2, value.var = "Coefficient")
 
-# ---- Define heatmap colors ----
-# Centered at 0. Use symmetric limits so blue/red are comparable.
+# Color scale centered at 0, symmetric by max absolute coefficient
 mx <- max(abs(heatmap_matrix), na.rm = TRUE)
-if (!is.finite(mx) || mx == 0) mx <- 1
-
 color_fun <- colorRamp2(c(-mx, 0, mx), c("blue", "white", "red"))
 
-# ---- Plot heatmap ----
 Heatmap(
   heatmap_matrix,
   name = "estimated coefficient",
