@@ -116,7 +116,7 @@ interaction_results <- interaction_results %>%
 
 
 significant_interactions <- interaction_results %>%
-  filter(!is.na(Adj_P_Interaction) & Adj_P_Interaction < 0.11)
+  filter(!is.na(Adj_P_Interaction) & Adj_P_Interaction < ) #adjust p value
 
 # -----------------------------------------------------------------------------
 # 3) Plots for significant interactions
