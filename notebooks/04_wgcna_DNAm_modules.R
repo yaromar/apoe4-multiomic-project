@@ -1,73 +1,77 @@
-# Yaro
-# Script: 04_wgcna_DNAm_modules.R
+# =============================================================================
+# 04_wgcna_DNAm_modules.R
 #
-# Purpose:
-#   Build WGCNA modules from selected CpGs (feature-selected CpGs),
-#   relate module eigengenes to AD-related phenotypes (adjusted regression),
-#   optionally run moderation (module × APOE interaction),
-#   and run enrichment (GO/KEGG) for CpGs in modules of interest.
+# PURPOSE
+# -------
+# Run WGCNA on selected CpGs,
+# define co-methylation modules, compute module eigengenes, and test:
+#   (A) module ~ trait associations (linear models; adjusted for covariates)
+#   (B) moderation: trait ~ module * APOE4 (logistic models; interaction term)
 #
+# Then:
+# - module GO/KEGG enrichment via missMethyl::gometh
+# - compute CpG "module membership" and "gene significance"
+# - export CpG-to-module assignment file
+# - optional: load TOM and compute hub CpGs (top 10% TOM-sum) for enrichment
 #
-# Outputs:
-#   - WGCNA module assignment CSV (cpg_assignment_PFC.csv)
-#   - Module–trait heatmaps (main effects and moderation effects)
-#   - Optional: enrichment tables and plots
+# =============================================================================
 
 setwd("~/Desktop/research/ROSMAP/DNAme/WGCNA/")
 set.seed(0)
 
-# ---- Libraries ----
+# -----------------------------------------------------------------------------
+# Libraries
+# -----------------------------------------------------------------------------
 library(WGCNA)
 library(dplyr)
 library(reshape2)
-library(minfi)
 library(missMethyl)
-library(ggplot2)
+library(minfi)
+library(VennDiagram)
+library(grid)
 
 allowWGCNAThreads()
 options(stringsAsFactors = FALSE)
 
-# ---- Load CpG list (feature-selected CpGs) ----
-cpgs_df <- read.csv("~/Desktop/research/ROSMAP/DNAme/feature_selection/niareagansc_recode_cpgs_PFC.csv")
-cpgs <- na.omit(cpgs_df$APOE_TRUE_only)
+# -----------------------------------------------------------------------------
+# STEP 1: Choose CpGs used for WGCNA
+# -----------------------------------------------------------------------------
+# Feature-selected CpGs from prior EWAS step:
+cpgs <- read.csv("~/Desktop/research/ROSMAP/DNAme/feature_selection/niareagansc_recode_cpgs_PFC.csv")
+cpgs <- na.omit(cpgs$APOE_TRUE_only)
 
-# Safety checks: CpGs exist in methylation matrix
-cpgs <- intersect(cpgs, colnames(DNAm_all))
-stopifnot(length(cpgs) > 0)
+# Alternative: CpGs significant for APOE interaction scan
+# cpgs <- methylation_interaction_results[methylation_interaction_results$P_Interaction < 0.05, ]$Protein
 
-# ---- Align phenotype to DNAm_all ----
-# Ensure big_pheno_all is matched to DNAm_all row order.
-big_pheno_all <- big_pheno_all[big_pheno_all$projid %in% rownames(DNAm_all), , drop = FALSE]
-DNAm_all <- DNAm_all[match(big_pheno_all$projid, rownames(DNAm_all)), , drop = FALSE]
-stopifnot(identical(rownames(DNAm_all), as.character(big_pheno_all$projid)))
+# -----------------------------------------------------------------------------
+# STEP 2: Build expression-like matrix for WGCNA (CpGs as "genes")
+# -----------------------------------------------------------------------------
+# Keeping exactly that.
+datExpr <- scale(DNAm_all[, cpgs])
 
-# ---- Expression-like matrix for WGCNA ----
-# WGCNA expects samples × features. Here: samples × CpGs.
-datExpr <- scale(DNAm_all[, cpgs, drop = FALSE])
-
-# Drop any samples/CpGs with too many missing values / invalid entries.
+# Ensure no missingness / WGCNA compatibility (optional sanity check)
 gsg <- goodSamplesGenes(datExpr, verbose = 3)
 if (!gsg$allOK) {
-  datExpr <- datExpr[gsg$goodSamples, gsg$goodGenes, drop = FALSE]
-  big_pheno_all <- big_pheno_all[big_pheno_all$projid %in% rownames(datExpr), , drop = FALSE]
-  datExpr <- datExpr[match(big_pheno_all$projid, rownames(datExpr)), , drop = FALSE]
+  datExpr <- datExpr[gsg$goodSamples, gsg$goodGenes]
 }
-stopifnot(identical(rownames(datExpr), as.character(big_pheno_all$projid)))
 
 nSamples <- nrow(datExpr)
-nGenes <- ncol(datExpr)
+nGenes   <- ncol(datExpr)
 
-# ---- Soft-threshold power selection ----
-powers <- c(seq(2, 10, by = 2))
+# -----------------------------------------------------------------------------
+# STEP 3: Pick soft-threshold
+# -----------------------------------------------------------------------------
+powers <- c(seq(2, 4, by = 2))  # adjust the range
 
 sft <- pickSoftThreshold(
   datExpr,
   powerVector = powers,
   verbose = 5,
-  networkType = "signed"
+  networkType = "signed",
+  blockSize = 32000
 )
 
-# Plot scale-free fit and mean connectivity to choose power.
+# Plot scale independence and mean connectivity
 sizeGrWindow(9, 5)
 par(mfrow = c(1, 2))
 cex1 <- 0.9
@@ -99,48 +103,69 @@ plot(
 )
 text(sft$fitIndices[, 1], sft$fitIndices[, 5], labels = powers, cex = cex1, col = "red")
 
-# ---- Network construction ----
-chosen_power <- 6
-
+# -----------------------------------------------------------------------------
+# STEP 4: Build modules
+# -----------------------------------------------------------------------------
 net_PFC_DNAme <- blockwiseModules(
   datExpr,
-  power = chosen_power,
+  power = 6,                      # 6 for regular; 4 for moderated 
   networkType = "signed",
   minModuleSize = 30,
-  maxBlockSize = max(1000, nGenes),
+  maxBlockSize = 34000,
   numericLabels = TRUE,
-  saveTOMs = FALSE,
+  # saveTOMs = TRUE,
   saveTOMFileBase = "PFC_AD_anycog_TOM",
   verbose = 3,
   nThreads = 8
 )
 
-# Module colors and eigengenes
+table(net_PFC_DNAme$colors)
+
+# Convert numeric module labels to color names
 moduleLabels_DNAme <- net_PFC_DNAme$colors
-moduleColors_DNAme <- labels2colors(moduleLabels_DNAme)
+moduleColors_DNAme <- labels2colors(net_PFC_DNAme$colors)
 
-MEs_DNAme0 <- moduleEigengenes(datExpr, colors = moduleColors_DNAme)$eigengenes
-MEs_DNAme <- orderMEs(MEs_DNAme0)
-
+# Dendrogram for reference
 geneTree_DNAme <- net_PFC_DNAme$dendrograms[[1]]
 
-# Module membership table
-table(moduleColors_DNAme)
+# Compute module eigengenes from moduleColors_DNAme 
+MEs_DNAme0 <- moduleEigengenes(datExpr, colors = moduleColors_DNAme)$eigengenes
+MEs_DNAme  <- orderMEs(MEs_DNAme0)
 
-# ---- Optional: override module assignments from saved CSV ----
-use_saved_assignments <- FALSE
+# -----------------------------------------------------------------------------
+# OPTIONAL: Override module assignments from an external file
+# -----------------------------------------------------------------------------
+use_external_module_assignments <- FALSE
 
-if (use_saved_assignments) {
+if (use_external_module_assignments) {
   module_assignments <- read.csv("./cpg_assignment_PFC.csv", stringsAsFactors = FALSE)
+
+  # Sanity checks
   stopifnot(all(module_assignments$probes %in% colnames(datExpr)))
+  stopifnot(all(colnames(datExpr) %in% module_assignments$probes))
+
   moduleColors_DNAme <- module_assignments$moduleColor
   names(moduleColors_DNAme) <- module_assignments$probes
   moduleColors_DNAme <- moduleColors_DNAme[colnames(datExpr)]
+
   MEs_DNAme0 <- moduleEigengenes(datExpr, colors = moduleColors_DNAme)$eigengenes
-  MEs_DNAme <- orderMEs(MEs_DNAme0)
+  MEs_DNAme  <- orderMEs(MEs_DNAme0)
 }
 
-# ---- Phenotype engineering (binary encodings you used later) ----
+# -----------------------------------------------------------------------------
+# STEP 5: Prepare phenotype data for modeling 
+# -----------------------------------------------------------------------------
+# Ensure big_pheno_all is aligned to datExpr rows 
+big_pheno_all <- big_pheno_all[rownames(datExpr), ]
+
+# Scale numeric phenotypes 
+numeric_columns <- colnames(big_pheno_all)[sapply(big_pheno_all, is.numeric)]
+if (length(numeric_columns) >= 2) {
+  numeric_columns_to_scale <- numeric_columns[2:length(numeric_columns)]
+  big_pheno_all[, numeric_columns_to_scale] <- scale(big_pheno_all[, numeric_columns_to_scale])
+}
+
+# Create derived binary traits 
 big_pheno_all$braaksc_num <- ifelse(big_pheno_all$braaksc %in% c(3,4), 1,
                                    ifelse(big_pheno_all$braaksc %in% c(1,2), 0, NA))
 big_pheno_all$braaksc_num <- as.factor(big_pheno_all$braaksc_num)
@@ -157,217 +182,207 @@ big_pheno_all$ADvsNorm <- ifelse(big_pheno_all$cogdx == 3, 1,
                                 ifelse(big_pheno_all$cogdx == 1, 0, NA))
 big_pheno_all$ADvsNorm <- as.factor(big_pheno_all$ADvsNorm)
 
-# Ensure phenotype data matches datExpr samples exactly
-big_pheno_all <- big_pheno_all[match(rownames(datExpr), big_pheno_all$projid), , drop = FALSE]
-stopifnot(identical(rownames(datExpr), as.character(big_pheno_all$projid)))
+# Traits analyzed in module-trait regression
+phenotypes <- c(
+  "niareagansc_recode",
+  "ADvsNorm",
+  "apoe_genotype_num",
+  "ceradsc_num",
+  "braaksc_num"
+)
 
-# Scale numeric columns (optional; you did this in your original)
-numeric_columns <- colnames(big_pheno_all)[sapply(big_pheno_all, is.numeric)]
-numeric_columns <- setdiff(numeric_columns, "projid")
-big_pheno_all[, numeric_columns] <- scale(big_pheno_all[, numeric_columns])
-
-# ---- Module–trait association via adjusted linear models ----
-phenotypes <- c("niareagansc_recode", "ADvsNorm",
-                "apoe_genotype_num", "ceradsc_num", "braaksc_num")
-
-covars <- c("Female", "Age", "pmi", "neurons_pfc")
-
-# Fit: scale(ME) ~ trait + covariates
-results_main <- list()
+# -----------------------------------------------------------------------------
+# STEP 6: Linear models: scale(ME) ~ trait + covariates
+# -----------------------------------------------------------------------------
+# Shows how each module eigengene associates with each trait (adjusted)
+results_linear <- list()
 
 for (trait in phenotypes) {
   for (module in names(MEs_DNAme)) {
 
-    df <- cbind(MEs_DNAme, big_pheno_all)
-
-    # Build model formula
-    fml <- as.formula(
-      paste0("scale(", module, ") ~ ", trait, " + ", paste(covars, collapse = " + "))
+    formula_str <- paste0(
+      "scale(", module, ") ~ ", trait, " + Female + Age + pmi + neurons_pfc"
     )
-
-    model <- lm(fml, data = df)
+    model <- lm(as.formula(formula_str), data = cbind(MEs_DNAme, big_pheno_all))
     sm <- summary(model)
 
-    # Determine coefficient name for trait
-    # If trait is factor, coefficient often ends with '1' when coded 0/1 as factor.
-    # Keep your existing assumption but guard in case it differs.
-    if (is.factor(df[[trait]])) {
-      coef_name <- paste0(trait, "1")
-    } else {
-      coef_name <- trait
-    }
+    coef_name <- if (is.factor(big_pheno_all[[trait]])) paste0(trait, "1") else trait
 
     if (coef_name %in% rownames(sm$coefficients)) {
-      results_main[[paste(module, trait, sep = "_")]] <- c(
-        sm$coefficients[coef_name, ],
-        module = module,
-        trait = trait
-      )
+      results_linear[[paste(module, trait, sep = "_")]] <-
+        c(sm$coefficients[coef_name, ], module = module, trait = trait)
     }
   }
 }
 
-results_main_df <- as.data.frame(do.call(rbind, results_main))
-results_main_df[, 1:4] <- sapply(results_main_df[, 1:4], as.numeric)
+results_df <- as.data.frame(do.call(rbind, results_linear))
+results_df[, 1:4] <- sapply(results_df[, 1:4], as.numeric)
 
-# Create estimate and p-value matrices for heatmap
-est_main <- acast(results_main_df, module ~ trait, value.var = "Estimate")
-p_main <- acast(results_main_df, module ~ trait, value.var = "Pr(>|t|)")
+results_matrix <- acast(results_df, module ~ trait, value.var = "Estimate")
+pvalue_matrix  <- acast(results_df, module ~ trait, value.var = "Pr(>|t|)")
 
-# Remove grey module
-est_main <- est_main[rownames(est_main) != "MEgrey", , drop = FALSE]
-p_main <- p_main[rownames(p_main) != "MEgrey", , drop = FALSE]
+# Drop MEgrey
+results_matrix <- results_matrix[rownames(results_matrix) != "MEgrey", , drop = FALSE]
+pvalue_matrix  <- pvalue_matrix[rownames(pvalue_matrix)  != "MEgrey", , drop = FALSE]
 
-# Reorder columns according to your phenotype order
-est_main <- est_main[, phenotypes, drop = FALSE]
-p_main <- p_main[, phenotypes, drop = FALSE]
+# Enforce column order
+results_matrix <- results_matrix[, phenotypes, drop = FALSE]
+pvalue_matrix  <- pvalue_matrix[, phenotypes, drop = FALSE]
 
-# Cluster modules based on their estimate patterns
-row_hclust <- hclust(dist(est_main, method = "euclidean"), method = "complete")
-row_order <- order.dendrogram(as.dendrogram(row_hclust))
-est_main <- est_main[row_order, , drop = FALSE]
-p_main <- p_main[row_order, , drop = FALSE]
+# Cluster rows (Euclidean on estimated effects)
+row_hclust <- hclust(dist(results_matrix, method = "euclidean"), method = "complete")
+row_order  <- order.dendrogram(as.dendrogram(row_hclust))
 
-# Text matrix: estimate + p-value
-text_main <- paste0(signif(est_main, 2), "\n(", signif(p_main, 2), ")")
-dim(text_main) <- dim(est_main)
+results_matrix <- results_matrix[row_order, , drop = FALSE]
+pvalue_matrix  <- pvalue_matrix[row_order,  , drop = FALSE]
 
-# Plot
+textMatrix <- paste(signif(results_matrix, 2), "\n(", signif(pvalue_matrix, 1), ")", sep = "")
+dim(textMatrix) <- dim(results_matrix)
+
 par(mar = c(11, 2, 4, 1))
-max_val <- 1  # keep your fixed scaling for comparability
+max_val <- 1  # you hard-set this; keep it
+
 labeledHeatmap(
-  Matrix = est_main,
+  Matrix = results_matrix,
   xLabels = c("Reagan", "Clinical dx", "APOE4", "CERAD", "Braak"),
-  yLabels = rownames(est_main),
+  yLabels = rownames(results_matrix),
   colorLabels = FALSE,
   colors = blueWhiteRed(50),
-  textMatrix = text_main,
+  textMatrix = textMatrix,
   setStdMargins = FALSE,
   cex.text = 1.4,
-  cex.lab = 2,
+  cex.lab  = 2,
   cex.main = 1.8,
   zlim = c(-max_val, max_val),
-  main = "Module–trait relationships adjusted for Sex, Age, PMI, Neurons (PFC)"
+  main = "Module-trait relationships adjusted for Sex, Age, and pmi \n Prefrontal Cortex"
 )
 
-# ---- Moderation analysis: trait ~ ME * apoe_genotype + covariates ----
-# This tests whether the association between module eigengene and trait differs by APOE carrier status.
-
-binary_traits_for_moderation <- phenotypes  # keep your list, but see suggestions below
-
+# -----------------------------------------------------------------------------
+# STEP 7: Moderation analysis (logistic): trait ~ scale(ME) * apoe_genotype + covariates
+# -----------------------------------------------------------------------------
+# NOTE: This only makes sense when trait is binary and modeled with binomial.
 results_mod <- list()
 
-for (trait in binary_traits_for_moderation) {
+for (trait in phenotypes) {
   for (module in names(MEs_DNAme)) {
 
-    df <- cbind(MEs_DNAme, big_pheno_all)
-
-    fml <- as.formula(
-      paste0(trait, " ~ scale(", module, ") * apoe_genotype + ",
-             paste(covars, collapse = " + "))
+    formula_str <- paste0(
+      trait, " ~ scale(", module, ") * apoe_genotype + Female + Age + neurons_pfc + pmi"
     )
 
-    model <- glm(fml, data = df, family = binomial(link = "logit"))
+    model <- glm(
+      as.formula(formula_str),
+      data = cbind(MEs_DNAme, big_pheno_all),
+      family = binomial(link = "logit")
+    )
+
     sm <- summary(model)
 
     coef_name <- paste0("scale(", module, "):apoe_genotypeTRUE")
 
     if (coef_name %in% rownames(sm$coefficients)) {
-      results_mod[[paste(module, trait, sep = "_")]] <- c(
-        sm$coefficients[coef_name, ],
-        module = module,
-        trait = trait
-      )
+      results_mod[[paste(module, trait, sep = "_")]] <-
+        c(sm$coefficients[coef_name, ], module = module, trait = trait)
     }
   }
 }
 
-results_mod_df <- as.data.frame(do.call(rbind, results_mod))
-results_mod_df[, 1:4] <- sapply(results_mod_df[, 1:4], as.numeric)
+results_df_mod <- as.data.frame(do.call(rbind, results_mod))
+results_df_mod[, 1:4] <- sapply(results_df_mod[, 1:4], as.numeric)
 
-est_mod <- acast(results_mod_df, module ~ trait, value.var = "Estimate")
-p_mod <- acast(results_mod_df, module ~ trait, value.var = "Pr(>|z|)")
+results_matrix_mod <- acast(results_df_mod, module ~ trait, value.var = "Estimate")
+pvalue_matrix_mod  <- acast(results_df_mod, module ~ trait, value.var = "Pr(>|z|)")
 
-est_mod <- est_mod[rownames(est_mod) != "MEgrey", , drop = FALSE]
-p_mod <- p_mod[rownames(p_mod) != "MEgrey", , drop = FALSE]
+results_matrix_mod <- results_matrix_mod[rownames(results_matrix_mod) != "MEgrey", , drop = FALSE]
+pvalue_matrix_mod  <- pvalue_matrix_mod[rownames(pvalue_matrix_mod)  != "MEgrey", , drop = FALSE]
 
-est_mod <- est_mod[, phenotypes, drop = FALSE]
-p_mod <- p_mod[, phenotypes, drop = FALSE]
+results_matrix_mod <- results_matrix_mod[, phenotypes, drop = FALSE]
+pvalue_matrix_mod  <- pvalue_matrix_mod[, phenotypes, drop = FALSE]
 
-row_hclust <- hclust(dist(est_mod, method = "euclidean"), method = "complete")
-row_order <- order.dendrogram(as.dendrogram(row_hclust))
-est_mod <- est_mod[row_order, , drop = FALSE]
-p_mod <- p_mod[row_order, , drop = FALSE]
+row_hclust <- hclust(dist(results_matrix_mod, method = "euclidean"), method = "complete")
+row_order  <- order.dendrogram(as.dendrogram(row_hclust))
 
-text_mod <- paste0(signif(est_mod, 2), "\n(", signif(p_mod, 2), ")")
-dim(text_mod) <- dim(est_mod)
+results_matrix_mod <- results_matrix_mod[row_order, , drop = FALSE]
+pvalue_matrix_mod  <- pvalue_matrix_mod[row_order,  , drop = FALSE]
+
+textMatrix <- paste(signif(results_matrix_mod, 2), "\n(", signif(pvalue_matrix_mod, 1), ")", sep = "")
+dim(textMatrix) <- dim(results_matrix_mod)
 
 par(mar = c(11, 2, 4, 1))
-max_val_mod <- max(abs(est_mod), na.rm = TRUE)
+max_val <- max(abs(range(results_matrix_mod, na.rm = TRUE)))
 
 labeledHeatmap(
-  Matrix = est_mod,
+  Matrix = results_matrix_mod,
   xLabels = c("Reagan", "Clinical+Reagan", "APOE4", "CERAD", "Braak"),
-  yLabels = rownames(est_mod),
+  yLabels = rownames(results_matrix_mod),
   colorLabels = FALSE,
   colors = blueWhiteRed(50),
-  textMatrix = text_mod,
+  textMatrix = textMatrix,
   setStdMargins = FALSE,
   cex.text = 1.4,
-  cex.lab = 2,
+  cex.lab  = 2,
   cex.main = 1.8,
-  zlim = c(-max_val_mod, max_val_mod),
-  main = "Moderation: (Module eigengene × APOE) effect on trait"
+  zlim = c(-max_val, max_val),
+  main = "Module's Moderation Effect on the \n APOE4-Trait Relationship"
 )
 
-# ---- Enrichment for CpGs in modules of interest ----
-# Example: choose module colors of interest.
-modules_of_interest <- c("pink")
+# -----------------------------------------------------------------------------
+# STEP 8: Module enrichment (GO/KEGG) using missMethyl::gometh
+# -----------------------------------------------------------------------------
+# Example: test a single module 
+cpgs_to_test <- names(net_PFC_DNAme$colors)[moduleColors_DNAme %in% c("pink")]
 
-cpgs_to_test <- colnames(datExpr)[moduleColors_DNAme %in% modules_of_interest]
+gst_go <- gometh(sig.cpg = cpgs_to_test, all.cpg = colnames(datExpr), array.type = "EPIC")
+gst_go[gst_go$FDR < 0.1, c("TERM", "FDR")][order(gst_go$FDR[gst_go$FDR < 0.1]), ]
 
-if (length(cpgs_to_test) > 0) {
+filtered_gst <- gst_go[gst_go$FDR <= 0.1, ]
+sorted_gst   <- filtered_gst[order(filtered_gst$FDR), ]
+top_gst      <- head(sorted_gst, 10)
 
-  gst_go <- gometh(sig.cpg = cpgs_to_test, all.cpg = colnames(datExpr), array.type = "EPIC")
+library(ggplot2)
+ggplot(top_gst, aes(x = reorder(TERM, FDR), y = FDR)) +
+  geom_bar(stat = "identity", color = "black") +
+  coord_flip() +
+  labs(x = "GO Term", y = "FDR") +
+  theme_minimal()
 
-  # Filter and sort for export/plotting
-  filtered_gst <- gst_go[gst_go$FDR <= 0.1, ]
-  sorted_gst <- filtered_gst[order(filtered_gst$FDR), ]
-  top_gst <- head(sorted_gst, 10)
+write.csv(top_gst, "./enrichment_moderator_positive_PFC.csv")
 
-  # Save enrichment results
-  write.csv(top_gst, "./enrichment_moderator_positive_PFC.csv", row.names = FALSE)
+# KEGG enrichment example 
+gst_kegg <- gometh(sig.cpg = cpgs, all.cpg = colnames(DNAm_all), array.type = "EPIC", collection = "KEGG")
+gst_kegg[gst_kegg$FDR < 0.1, c("Description", "FDR")][order(gst_kegg$FDR[gst_kegg$FDR < 0.1]), ]
 
-  # Plot top terms (note: your original y-axis label was -log10(FDR) but you plotted FDR directly)
-  ggplot(top_gst, aes(x = reorder(TERM, FDR), y = -log10(FDR))) +
-    geom_bar(stat = "identity", color = "black") +
-    coord_flip() +
-    labs(x = "GO Term", y = "-log10(FDR)") +
-    theme_minimal()
-}
+# check which module is CpG in
+moduleColors_DNAme[which(names(net_PFC_DNAme$colors) %in% c("cg06329447"))]
 
-# ---- Save CpG assignment table (module membership + trait significance) ----
-# This recreates the canonical WGCNA output structure used for hub selection and follow-up.
-
-niareagansc_recode_num <- as.data.frame(as.numeric(big_pheno_all$niareagansc_recode))
-names(niareagansc_recode_num) <- "niareagansc_recode"
+# -----------------------------------------------------------------------------
+# STEP 9: Module membership (MM) and gene significance (GS) for niareagansc_recode
+# -----------------------------------------------------------------------------
+niareagansc_recode <- as.data.frame(as.numeric(big_pheno_all$niareagansc_recode))
+names(niareagansc_recode) <- "niareagansc_recode"
 
 modNames <- substring(names(MEs_DNAme), 3)
 
 geneModuleMembership <- as.data.frame(cor(datExpr, MEs_DNAme, use = "p"))
 MMPvalue <- as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
 
-names(geneModuleMembership) <- paste0("MM", modNames)
-names(MMPvalue) <- paste0("p.MM", modNames)
+names(geneModuleMembership) <- paste("MM", modNames, sep = "")
+names(MMPvalue)            <- paste("p.MM", modNames, sep = "")
 
-geneTraitSignificance <- as.data.frame(cor(datExpr, niareagansc_recode_num, use = "p"))
+geneTraitSignificance <- as.data.frame(cor(datExpr, niareagansc_recode, use = "p"))
 GSPvalue <- as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
-names(geneTraitSignificance) <- "GS.niareagansc_recode"
-names(GSPvalue) <- "p.GS.niareagansc_recode"
+names(geneTraitSignificance) <- paste("GS.", names(niareagansc_recode), sep = "")
+names(GSPvalue)             <- paste("p.GS.", names(niareagansc_recode), sep = "")
 
+# -----------------------------------------------------------------------------
+# STEP 10: Annotation and export CpG assignment file
+# -----------------------------------------------------------------------------
 annEPIC <- getAnnotation("IlluminaHumanMethylationEPICanno.ilm10b2.hg19")
 probes <- colnames(datExpr)
 probes2annEPIC <- match(probes, annEPIC$Name)
+
+# How many probes missing annotation (expect 0)
+sum(is.na(probes2annEPIC))
 
 geneInfo0 <- data.frame(
   probes = probes,
@@ -379,25 +394,74 @@ geneInfo0 <- data.frame(
   stringsAsFactors = FALSE
 )
 
-# Order modules by their correlation with the trait (optional)
-modOrder <- order(-abs(cor(MEs_DNAme, niareagansc_recode_num, use = "p")))
+# Order modules by correlation with trait, then add MM columns in that order
+modOrder <- order(-abs(cor(MEs_DNAme, niareagansc_recode, use = "p")))
 
 for (mod in 1:ncol(geneModuleMembership)) {
   oldnames <- names(geneInfo0)
-  geneInfo0 <- data.frame(
-    geneInfo0,
-    geneModuleMembership[, modOrder[mod]],
-    MMPvalue[, modOrder[mod]],
-    stringsAsFactors = FALSE
-  )
-  names(geneInfo0) <- c(
-    oldnames,
-    paste0("MM.", modNames[modOrder[mod]]),
-    paste0("p.MM.", modNames[modOrder[mod]])
-  )
+  geneInfo0 <- data.frame(geneInfo0,
+                          geneModuleMembership[, modOrder[mod]],
+                          MMPvalue[, modOrder[mod]])
+  names(geneInfo0) <- c(oldnames,
+                        paste("MM.", modNames[modOrder[mod]], sep = ""),
+                        paste("p.MM.", modNames[modOrder[mod]], sep = ""))
 }
 
 geneOrder <- order(geneInfo0$moduleColor, -abs(geneInfo0$GS.niareagansc_recode))
 geneInfo <- geneInfo0[geneOrder, ]
 
-write.csv(geneInfo, file = "./cpg_assignment_PFC.csv", row.names = FALSE)
+geneInfo
+write.csv(geneInfo, file = "./cpg_assignment_PFC.csv")
+
+# -----------------------------------------------------------------------------
+# STEP 11 (Optional): Hub CpG enrichment using TOM
+# -----------------------------------------------------------------------------
+# Requires that you saved TOMs in blockwiseModules
+# load("PFC_AD_anycog_TOM-block.1.RData")
+#
+# NOTE: If TOM is stored as a compact vector (lower triangle), we can use listToMatrix().
+
+# load("PFC_AD_anycog_TOM-block.1.RData")
+#
+# listToMatrix <- function(TOM, n) {
+#   tomMatrix <- matrix(0, n, n)
+#   tomMatrix[lower.tri(tomMatrix)] <- TOM
+#   tomMatrix <- tomMatrix + t(tomMatrix)
+#   tomMatrix
+# }
+#
+# tomMatrix <- listToMatrix(TOM, nGenes)
+# rm(TOM)
+#
+# # Choose which modules to use
+# selectedModules <- gsub("^ME", "", names(MEs_DNAme))  # or set manually: c("blue","pink",...)
+#
+# allHubCpGs <- character(0)
+#
+# for (module in selectedModules) {
+#   probes_idx <- which(moduleColors_DNAme == module)
+#   if (length(probes_idx) < 2) next
+#
+#   modTOM <- tomMatrix[probes_idx, probes_idx, drop = FALSE]
+#   cpg_ids <- names(net_PFC_DNAme$colors)[moduleColors_DNAme == module]
+#   dimnames(modTOM) <- list(cpg_ids, cpg_ids)
+#
+#   TOMsimilaritySum <- rowSums(modTOM)
+#   hubCpGs <- cpg_ids[TOMsimilaritySum >= quantile(TOMsimilaritySum, 0.9, na.rm = TRUE)]
+#   allHubCpGs <- c(allHubCpGs, hubCpGs)
+# }
+#
+# # Enrichment on hub CpGs
+# gst_hub_go <- gometh(sig.cpg = allHubCpGs, all.cpg = colnames(PFCSamples), array.type = "EPIC")
+# gst_hub_go[order(gst_hub_go$FDR), c("TERM", "FDR")]
+#
+# gst_hub_kegg <- gometh(sig.cpg = allHubCpGs, all.cpg = colnames(PFCSamples), array.type = "EPIC", collection = "KEGG")
+# gst_hub_kegg[order(gst_hub_kegg$FDR), c("Description", "FDR")]
+#
+# rm(tomMatrix)
+
+# -----------------------------------------------------------------------------
+# STEP 12 (Optional): check coefficient in a CpG of interest
+# -----------------------------------------------------------------------------
+# This uses DNAm_APOE
+# summary(lm(DNAm_APOE[, "cg06108056"] ~ niareagansc_recode + Female + Age + pmi + neurons_pfc, data = big_pheno_APOE))
