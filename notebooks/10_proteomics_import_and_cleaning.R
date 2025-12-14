@@ -1,243 +1,312 @@
-# Yaro
-# Proteomics + RT calibration import + QC scaffolding
+# =============================================================================
+# 10_proteomics_import_and_cleaning.R
 #
-# Purpose:
-#   1) Read per-sample "Samples Table of Levine DIA ..." CSVs across batches.
-#   2) Build a SampleID × ProteinName intensity matrix with Batch info.
-#   3) Read RT calibration "Individual Peptide Result" CSVs across batches.
-#   4) Parse sample code from mzML-style Sample strings into a clean Sample key.
-#   5) Pivot RT calibration to wide (Sample × {Quant/RT/Batch/etc}_PEPTIDESEQ).
-#   6) Build sample metadata table (Sample, SampleNumber, Batch, Region).
+# PURPOSE
+# -------
+# 1) Read Levine DIA proteomics "Samples Table" CSVs across batches 1–6.
+#    Build a sample x protein wide matrix of intensities, with Batch label.
+#    Do quick missingness and abundance QC; infer brain region from SampleID.
 #
-# Notes:
-#   - This script currently keeps ProteinName (not collapsing to GeneName).
-#   - It does not yet merge proteins with RTC (but sets up consistent keys to do so).
+# 2) Read Levine RTC "Individual Peptide Result" CSVs across batches 1–6.
+#    Parse sample identifiers from mzML-like strings; build peptide-wide table
+#    and extract sample metadata (Sample, SampleNumber, Batch_RTC, Region).
+#
+# EXPECTED INPUT FILE STRUCTURE
+# -----------------------------
+# Protein-level tables:
+#   ./proteomics/ROSMAP Proteomics/Levine DIA Result_Batch-0X/.../*.csv
+#    - must contain column 'Protein Name'
+#    - intensity is assumed to be the last column
+#
+# RTC peptide result tables:
+#   ./proteomics/ROSMAP Proteomics/Levine_Batch-0X_RTC Individual Peptide Result/*.csv
+#    - must contain column 'Sample' with mzML filename string
+#    - columns: Sequence, Quant..Intensity, RT.Start..min., RT.Center..min., RT.Stop..min.
+#
+# =============================================================================
 
 suppressPackageStartupMessages({
   library(dplyr)
   library(tidyr)
   library(readr)
   library(purrr)
-  library(stringr)
   library(ggplot2)
+  library(stringr)
 })
 
 setwd("~/Desktop/research/ROSMAP/")
-set.seed(0)
 
-# -----------------------------
-# 1) DIA protein tables import
-# -----------------------------
+# -----------------------------------------------------------------------------
+# PART A: Protein-level DIA "Samples Table" import (sample x protein)
+# -----------------------------------------------------------------------------
 
-batch_dirs <- list(
-  "1" = "./proteomics/ROSMAP Proteomics/Levine DIA Result_Batch-01/Samples Table of Levine DIA Batch-01",
-  "2" = "./proteomics/ROSMAP Proteomics/Levine DIA Result_Batch-02/Samples Table of Levine DIA Batch-02",
-  "3" = "./proteomics/ROSMAP Proteomics/Levine DIA Result_Batch-03/Samples Table of Levine DIA_Batch-03",
-  "4" = "./proteomics/ROSMAP Proteomics/Levine DIA Result_Batch-04/Samples Table of Levine DIA_Batch-04",
-  "5" = "./proteomics/ROSMAP Proteomics/Levine DIA Result_Batch-05/Samples Table of Levine DIA Batch-05",
-  "6" = "./proteomics/ROSMAP Proteomics/Levine DIA Result_Batch-06/Samples Table of Levine DIA Batch-06"
-)
+# ---- Helper: read a single "Samples Table" csv and return a tidy long table
+# Output columns: ProteinName, Intensity, SampleID
+process_sample_file <- function(file_path) {
+  # Read the CSV
+  data <- read_csv(file_path, show_col_types = FALSE)
 
-extract_sample_id_from_filename <- function(file_path) {
+  # Extract sample identifier from filename
   sample_id <- tools::file_path_sans_ext(basename(file_path))
   sample_id <- gsub("Samples Table of Levine DIA ", "", sample_id)
-  sample_id
-}
 
-process_sample_file <- function(file_path, batch) {
-  df <- readr::read_csv(file_path, show_col_types = FALSE)
-
-  # Assumes:
-  #   - "Protein Name" exists
-  #   - last column is the intensity column
-  df <- df %>%
-    transmute(
-      ProteinName = .data[["Protein Name"]],
-      Intensity = suppressWarnings(as.numeric(dplyr::last_col())),
-      SampleID = extract_sample_id_from_filename(file_path),
-      Batch = as.character(batch)
-    ) %>%
-    filter(!is.na(Intensity), !is.na(ProteinName))
-
-  df
-}
-
-protein_long <- imap_dfr(batch_dirs, function(dir_path, batch_id) {
-  files <- list.files(dir_path, pattern = "\\.csv$", full.names = TRUE, recursive = TRUE)
-  if (length(files) == 0) stop(paste("No CSV files in:", dir_path))
-
-  map_dfr(files, ~process_sample_file(.x, batch = batch_id))
-})
-
-# If there are duplicate rows for the same SampleID × ProteinName, collapse by sum
-protein_long <- protein_long %>%
-  group_by(SampleID, ProteinName, Batch) %>%
-  summarise(Intensity = sum(Intensity, na.rm = TRUE), .groups = "drop")
-
-# Fix one known SampleID typo (only if it exists)
-protein_long$SampleID[protein_long$SampleID == "Samples Table of Levine Dia 254S"] <- "254S"
-
-# Build Sample × Protein matrix; keep SampleID + Batch as identifiers.
-peptide_intensities_df <- protein_long %>%
-  pivot_wider(
-    id_cols = c(SampleID, Batch),
-    names_from = ProteinName,
-    values_from = Intensity,
-    values_fill = NA
-  )
-
-# Remove proteins missing in (almost) everyone
-# NOTE: this uses a dynamic threshold rather than a hard-coded 1040.
-na_per_col <- colSums(is.na(peptide_intensities_df))
-# don’t apply to metadata columns
-na_per_col[names(na_per_col) %in% c("SampleID", "Batch")] <- 0
-
-# Example policy: drop proteins present in < 2 samples
-keep_cols <- names(na_per_col)[na_per_col < (nrow(peptide_intensities_df) - 1)]
-peptide_intensities_df <- peptide_intensities_df %>%
-  select(all_of(c("SampleID", "Batch", keep_cols[!keep_cols %in% c("SampleID", "Batch")])))
-
-# Remove completely missing samples (all protein columns NA)
-peptide_intensities_df <- peptide_intensities_df %>%
-  filter(rowSums(is.na(across(-c(SampleID, Batch)))) < (ncol(.) - 2))
-
-# Add Region derived from SampleID (C/P/S)
-peptide_intensities_df <- peptide_intensities_df %>%
-  mutate(
-    Region = case_when(
-      grepl("C", SampleID) ~ "CBM",
-      grepl("P", SampleID) ~ "PFC",
-      grepl("S", SampleID) ~ "ST",
-      TRUE ~ NA_character_
+  # Keep only the two needed fields: 'Protein Name' + last column as Intensity
+  data <- data %>%
+    select(ProteinName = `Protein Name`, Intensity = last_col()) %>%
+    mutate(
+      Intensity = as.numeric(Intensity),
+      SampleID  = sample_id
     )
+
+  data
+}
+
+# ---- Helper: import one batch directory and return wide sample x protein table
+read_protein_batch <- function(batch_id, batch_dir) {
+  files <- list.files(
+    path = batch_dir,
+    pattern = "\\.csv$",
+    full.names = TRUE,
+    recursive = TRUE
   )
 
-# QC: missingness per protein
-missing_per_column <- peptide_intensities_df %>%
-  summarise(across(where(is.numeric), ~sum(is.na(.)))) %>%
-  pivot_longer(everything(), names_to = "Protein", values_to = "MissingCount")
+  # Read all sample files in batch into long form
+  combined <- map_df(files, process_sample_file)
 
-ggplot(missing_per_column, aes(x = MissingCount)) +
-  geom_histogram(bins = 50) +
-  theme_minimal() +
-  labs(title = "Missing values per protein column", x = "# missing", y = "Count of proteins")
+  # Remove rows without intensity
+  combined <- combined[!is.na(combined$Intensity), ]
 
-# QC: number of non-missing proteins per sample
-nonmissing_per_sample <- peptide_intensities_df %>%
-  transmute(SampleID, NonMissingProteins = rowSums(!is.na(across(where(is.numeric)))))
+  combined_no_agg <- combined %>%
+    group_by(SampleID, ProteinName) %>%
+    ungroup()
 
-ggplot(nonmissing_per_sample, aes(x = NonMissingProteins)) +
-  geom_histogram(binwidth = 50) +
-  theme_minimal() +
-  labs(title = "Unique proteins per sample", x = "# non-missing proteins", y = "Frequency")
+  # Pivot to wide: rows = samples, columns = proteins
+  wide <- combined_no_agg %>%
+    pivot_wider(
+      names_from  = ProteinName,
+      values_from = Intensity,
+      values_fill = list(Intensity = NA)
+    )
 
-# -----------------------------------------
-# 2) RT calibration peptide results import
-# -----------------------------------------
+  wide$Batch <- as.character(batch_id)
+  wide
+}
 
-rtc_dirs <- list(
-  "1" = "./proteomics/ROSMAP Proteomics/Levine_Batch_01_RTC Individual Peptide Result",
-  "2" = "./proteomics/ROSMAP Proteomics/Levine_Batch-02_RTC Individual Peptide Result",
-  "3" = "./proteomics/ROSMAP Proteomics/Levine_Batch-03_RTC Individual Peptide Result",
-  "4" = "./proteomics/ROSMAP Proteomics/Levine_Batch-04_RTC Individual Peptide Result",
-  "5" = "./proteomics/ROSMAP Proteomics/Levine_Batch-05_RTC Individual Peptide Result",
-  "6" = "./proteomics/ROSMAP Proteomics/Levine_Batch-06_RTC Individual Peptide Result"
+# ---- Batch directories 
+batch_dirs <- list(
+  `1` = "./proteomics/ROSMAP Proteomics/Levine DIA Result_Batch-01/Samples Table of Levine DIA Batch-01",
+  `2` = "./proteomics/ROSMAP Proteomics/Levine DIA Result_Batch-02/Samples Table of Levine DIA Batch-02",
+  `3` = "./proteomics/ROSMAP Proteomics/Levine DIA Result_Batch-03/Samples Table of Levine DIA_Batch-03",
+  `4` = "./proteomics/ROSMAP Proteomics/Levine DIA Result_Batch-04/Samples Table of Levine DIA_Batch-04",
+  `5` = "./proteomics/ROSMAP Proteomics/Levine DIA Result_Batch-05/Samples Table of Levine DIA_Batch-05",
+  `6` = "./proteomics/ROSMAP Proteomics/Levine DIA Result_Batch-06/Samples Table of Levine DIA_Batch-06"
 )
 
-parse_rtc_sample_fields <- function(sample_vec) {
-  # Expected sample string looks like:
-  #   HFX20-2876_Levine_68P_r_20201104183859.mzML
-  # or HFX19-1468_Levine_195C.mzML
-  #
-  # We want:
-  #   InstrumentNumber: 20
-  #   SampleNumber: 2876  (or concatenated 20 + 2876 if you really want that)
-  #   SampleCode: 68P / 195C / etc (including _r or _r1)
-  pat <- "HFX(\\d+)-(\\d+)_?.*?_(\\d+[CPS](?:_r\\d?)?)_?.*?\\.mzML"
+# ---- Read all batches, bind to one protein intensity matrix
+final_by_batch <- imap(batch_dirs, ~ read_protein_batch(batch_id = .y, batch_dir = .x))
+peptide_intensities_df <- bind_rows(final_by_batch)
 
-  m <- stringr::str_match(sample_vec, pat)
-  tibble(
-    instrument = m[, 2],
-    run_number = m[, 3],
-    Sample = m[, 4]
+# One-off SampleID cleanup
+peptide_intensities_df$SampleID <- gsub("^Samples Table of Levine Dia 254S$", "254S", peptide_intensities_df$SampleID)
+
+# Remove proteins with extreme missingness 
+# NOTE: This assumes ~1040 samples
+peptide_intensities_df <- peptide_intensities_df[, -which(colSums(is.na(peptide_intensities_df)) >= 1040)]
+
+# Remove fully missing samples
+peptide_intensities_df <- peptide_intensities_df %>%
+  filter(rowSums(is.na(.)) < ncol(.))
+
+# Infer brain region from SampleID 
+peptide_intensities_df$Region <- ifelse(grepl("C", peptide_intensities_df$SampleID), "CBM",
+                                ifelse(grepl("P", peptide_intensities_df$SampleID), "PFC",
+                                ifelse(grepl("S", peptide_intensities_df$SampleID), "ST", NA)))
+
+# -----------------------------------------------------------------------------
+# Protein-level QC (optional)
+# -----------------------------------------------------------------------------
+missing_per_column <- peptide_intensities_df %>%
+  summarise(across(where(is.numeric), ~ sum(is.na(.))))
+
+hist(as.numeric(missing_per_column), main = "Missing values per protein", xlab = "# missing")
+
+missing_per_row_n <- peptide_intensities_df %>%
+  mutate(missing_count_n = rowSums(!is.na(.))) %>%
+  select(SampleID, missing_count_n)
+
+ggplot(missing_per_row_n, aes(x = missing_count_n)) +
+  theme_minimal() +
+  geom_histogram(binwidth = 50, fill = "blue", color = "black") +
+  labs(
+    title = "Histogram of Unique Proteins per Sample",
+    x = "Number of Unique Proteins",
+    y = "Frequency"
   )
+
+# Total intensity distribution by batch 
+total_intensity_all <- rowSums(
+  peptide_intensities_df[, !(colnames(peptide_intensities_df) %in% c("SampleID", "Batch", "Region"))],
+  na.rm = TRUE
+)
+
+hist(
+  rowSums(
+    peptide_intensities_df[peptide_intensities_df$Batch == "4",
+                           !(colnames(peptide_intensities_df) %in% c("SampleID", "Batch", "Region"))],
+    na.rm = TRUE
+  ),
+  breaks = 30,
+  xlim = range(total_intensity_all),
+  main = "Abundance of proteins -- batch 4",
+  xlab = "Total Intensity per Sample"
+)
+
+# Abundance by region 
+hist(
+  rowSums(
+    peptide_intensities_df[peptide_intensities_df$Region == "CBM",
+                           !(colnames(peptide_intensities_df) %in% c("SampleID", "Batch", "Region"))],
+    na.rm = TRUE
+  ),
+  breaks = 30,
+  xlim = range(total_intensity_all),
+  main = "Abundance of proteins -- CBM",
+  xlab = "Total Intensity per Sample"
+)
+
+# -----------------------------------------------------------------------------
+# PART B: RTC calibration peptide result import
+# -----------------------------------------------------------------------------
+
+# ---- Helper: parse mzML-like sample strings into SampleNumber + Sample code
+parse_rtc_sample_fields <- function(sample_str) {
+  pattern <- "HFX(\\d+)-(\\d+)_?.*?_(\\d+[CPS](_r\\d?)?)_?.*?.mzML"
+  m <- str_match(sample_str, pattern)
+
+  # sample_number = instrument + run 
+  sample_number <- paste0(m[, 2], m[, 3])
+  sample_code   <- m[, 4]
+
+  list(SampleNumber = sample_number, Sample = sample_code)
 }
 
-process_rtc_file <- function(file_path, batch) {
-  df <- read.csv(file_path)
+# ---- Helper: process one RTC peptide CSV
+process_rtc_file <- function(file_path) {
+  data <- read.csv(file_path)
 
-  # Require expected columns
-  stopifnot(all(c("Sample", "Sequence", "Quant..Intensity",
-                  "RT.Start..min.", "RT.Center..min.", "RT.Stop..min.") %in% names(df)))
+  # 'Sample' column is expected to contain mzML filename string(s)
+  matches <- str_match(data$Sample, "HFX(\\d+)-(\\d+)_?.*?_(\\d+[CPS](_r\\d?)?)_?.*?.mzML")
 
-  parsed <- parse_rtc_sample_fields(df$Sample)
+  sample_number <- apply(matches[, 2:3], 1, function(x) paste0(x, collapse = ""))
+  sample_code   <- matches[, 4]
 
-  df <- df %>%
-    mutate(
-      Sample = parsed$Sample,
-      SampleNumber = paste0(parsed$instrument, parsed$run_number),
-      Batch_RTC = as.character(batch)
-    ) %>%
-    filter(!is.na(Sample), Sequence != "END OF FILE") %>%
-    select(Sample, Sequence, Quant..Intensity, RT.Start..min., RT.Center..min., RT.Stop..min., SampleNumber, Batch_RTC) %>%
-    distinct()
+  data$SampleNumber <- sample_number
+  data$Sample <- sample_code
 
-  df
+  data %>%
+    select(Sample, Sequence, Quant..Intensity, RT.Start..min., RT.Center..min., RT.Stop..min., SampleNumber)
 }
 
-rt_calibration_long <- imap_dfr(rtc_dirs, function(dir_path, batch_id) {
-  files <- list.files(dir_path, pattern = "\\.csv$", full.names = TRUE, recursive = TRUE)
-  if (length(files) == 0) stop(paste("No CSV files in:", dir_path))
+# ---- Batch RTC directories + batch-specific file slicing 
+rtc_batch_dirs <- list(
+  `1` = list(dir = "./proteomics/ROSMAP Proteomics/Levine_Batch_01_RTC Individual Peptide Result", slice = 3:16),
+  `2` = list(dir = "./proteomics/ROSMAP Proteomics/Levine_Batch-02_RTC Individual Peptide Result", slice = 2:15),
+  `3` = list(dir = "./proteomics/ROSMAP Proteomics/Levine_Batch-03_RTC Individual Peptide Result", slice = 2:15),
+  `4` = list(dir = "./proteomics/ROSMAP Proteomics/Levine_Batch-04_RTC Individual Peptide Result", slice = 2:15),
+  `5` = list(dir = "./proteomics/ROSMAP Proteomics/Levine_Batch-05_RTC Individual Peptide Result", slice = 2:15),
+  `6` = list(dir = "./proteomics/ROSMAP Proteomics/Levine_Batch-06_RTC Individual Peptide Result", slice = 2:15)
+)
 
-  # IMPORTANT: do NOT slice files[2:15] etc. unless you have a known reason.
-  map_dfr(files, ~process_rtc_file(.x, batch = batch_id))
-})
+read_rtc_batch <- function(batch_id, info) {
+  file_paths <- list.files(info$dir, pattern = "\\.csv$", full.names = TRUE, recursive = TRUE)
 
-# Sanity: check duplicates (should be 1 row per Sample×Sequence after distinct)
-dup_check <- rt_calibration_long %>%
-  count(Sample, Sequence) %>%
+  file_paths <- file_paths[info$slice]
+
+  dat <- map_df(file_paths, process_rtc_file)
+  dat$Batch_RTC <- as.character(batch_id)
+  dat
+}
+
+rtc_list <- imap(rtc_batch_dirs, ~ read_rtc_batch(batch_id = .y, info = .x))
+rt_calibration_intensities_df <- bind_rows(rtc_list)
+
+# -----------------------------------------------------------------------------
+# RTC cleaning before pivot
+# -----------------------------------------------------------------------------
+# Identify duplicates 
+rt_calibration_intensities_df %>%
+  group_by(Sample, Sequence) %>%
+  summarise(n = n(), .groups = "drop") %>%
   filter(n > 1)
 
-if (nrow(dup_check) > 0) {
-  message("WARNING: duplicates remain for some Sample×Sequence pairs.")
-  print(dup_check)
-}
+# Drop NA samples
+rt_calibration_intensities_df <- rt_calibration_intensities_df %>% filter(!is.na(Sample))
 
-# Pivot RTC to wide: each peptide sequence becomes a set of columns
-rt_calibration_wide <- rt_calibration_long %>%
+# Drop "END OF FILE" pseudo-sequence rows
+rt_calibration_intensities_df <- rt_calibration_intensities_df %>% filter(Sequence != "END OF FILE")
+
+# Drop exact duplicates
+rt_calibration_intensities_df <- rt_calibration_intensities_df %>% distinct()
+
+# Re-check duplicates post-distinct 
+rt_calibration_intensities_df %>%
+  summarise(n = n(), .by = c(Sample, Sequence)) %>%
+  filter(n > 1)
+
+# -----------------------------------------------------------------------------
+# Pivot RTC table to wide: one row per Sample, columns per peptide sequence
+# -----------------------------------------------------------------------------
+rt_calibration_intensities_df <- rt_calibration_intensities_df %>%
   pivot_wider(
-    id_cols = Sample,
     names_from = Sequence,
     values_from = c(Quant..Intensity, RT.Start..min., RT.Center..min., RT.Stop..min., Batch_RTC, SampleNumber),
     names_glue = "{.value}_{Sequence}",
-    values_fill = NA
-  )
-
-# Add Region derived from Sample
-rt_calibration_wide <- rt_calibration_wide %>%
-  mutate(
-    Region = case_when(
-      grepl("C", Sample) ~ "CBM",
-      grepl("P", Sample) ~ "PFC",
-      grepl("S", Sample) ~ "ST",
-      TRUE ~ NA_character_
+    id_cols = Sample,
+    values_fill = list(
+      Quant..Intensity = NA,
+      RT.Start..min. = NA,
+      RT.Center..min. = NA,
+      RT.Stop..min. = NA,
+      Batch_RTC = NA,
+      SampleNumber = NA
     )
   )
 
-# Pick one representative SampleNumber and Batch column (choose a peptide you KNOW is always present)
-# Here we use ELASGLSFPVGFK and SFANQPLEVVYSK only if they exist.
-if ("SampleNumber_SFANQPLEVVYSK" %in% names(rt_calibration_wide)) {
-  rt_calibration_wide <- rt_calibration_wide %>%
-    mutate(SampleNumber = .data$SampleNumber_SFANQPLEVVYSK)
-}
+# Add Region column inferred from Sample code 
+rt_calibration_intensities_df$Region <- ifelse(grepl("C", rt_calibration_intensities_df$Sample), "CBM",
+                                       ifelse(grepl("P", rt_calibration_intensities_df$Sample), "PFC",
+                                       ifelse(grepl("S", rt_calibration_intensities_df$Sample), "ST", NA)))
 
-if ("Batch_RTC_ELASGLSFPVGFK" %in% names(rt_calibration_wide)) {
-  rt_calibration_wide <- rt_calibration_wide %>%
-    mutate(Batch = .data$Batch_RTC_ELASGLSFPVGFK)
-}
+# -----------------------------------------------------------------------------
+# Extract SampleNumber + Batch from wide table
+# -----------------------------------------------------------------------------:
+#   SampleNumber <- SampleNumber_SFANQPLEVVYSK
+#   Batch <- Batch_RTC_ELASGLSFPVGFK
 
-sample_metadata_df <- rt_calibration_wide %>%
+# Find any SampleNumber_* column and any Batch_RTC_* column to use as representative.
+sampleNumber_cols <- grep("^SampleNumber_", names(rt_calibration_intensities_df), value = TRUE)
+batch_cols        <- grep("^Batch_RTC_",    names(rt_calibration_intensities_df), value = TRUE)
+
+# Prefer the original specific sequences if present, else take the first available
+preferred_sn <- "SampleNumber_SFANQPLEVVYSK"
+preferred_b  <- "Batch_RTC_ELASGLSFPVGFK"
+
+sn_col <- if (preferred_sn %in% sampleNumber_cols) preferred_sn else sampleNumber_cols[1]
+b_col  <- if (preferred_b  %in% batch_cols)        preferred_b  else batch_cols[1]
+
+rt_calibration_intensities_df$SampleNumber <- rt_calibration_intensities_df[[sn_col]]
+rt_calibration_intensities_df$Batch        <- rt_calibration_intensities_df[[b_col]]
+
+# Build sample metadata table
+sample_metadata_df <- rt_calibration_intensities_df %>%
   select(Sample, SampleNumber, Batch, Region) %>%
   distinct()
 
-print(head(sample_metadata_df))
+# -----------------------------------------------------------------------------
+# Safe cleanup 
+# -----------------------------------------------------------------------------
+to_rm <- c(
+  "rtc_list", "final_by_batch",
+  "missing_per_column", "missing_per_row_n", "total_intensity_all"
+)
+rm(list = intersect(to_rm, ls()))
