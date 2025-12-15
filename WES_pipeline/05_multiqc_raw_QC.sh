@@ -3,7 +3,7 @@
 #
 # Purpose:
 #   Run MultiQC interactively to aggregate *raw* FastQC outputs (and any other QC logs)
-#   into a single report.
+#   into a single report, then clean up per-file FastQC reports to save space.
 #
 # This step is NOT a DSQ/array job — run interactively.
 #
@@ -19,15 +19,19 @@
 #   bash /path/to/WES_pipeline/05_multiqc_raw_QC.sh
 #
 # Resources:
-#   1 CPU, 15G RAM, ~5 minutes walltime 
+#   1 CPU, 15G RAM, ~5 minutes walltime (typical)
 
 set -euo pipefail
 
 OUTDIR="multiqc_report"
 mkdir -p "${OUTDIR}"
 
-# MultiQC scans the current directory recursively by default when given "*".
-# If you want to be explicit, you can replace "*" with ".".
+# Run MultiQC (recursively scans current directory)
 multiqc * -o "${OUTDIR}"
 
+# Cleanup: remove individual FastQC reports after aggregation
+# This removes both *_fastqc.html and *_fastqc.zip files inside subdirectories
+rm -f */*fastqc*
+
 echo "MultiQC report written to: ${OUTDIR}/"
+echo "Per-file FastQC reports removed."
