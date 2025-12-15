@@ -346,7 +346,6 @@ ggplot(top_gst, aes(x = reorder(TERM, FDR), y = FDR)) +
   labs(x = "GO Term", y = "FDR") +
   theme_minimal()
 
-write.csv(top_gst, "./enrichment_moderator_positive_PFC.csv")
 
 # KEGG enrichment example 
 gst_kegg <- gometh(sig.cpg = cpgs, all.cpg = colnames(DNAm_all), array.type = "EPIC", collection = "KEGG")
@@ -411,7 +410,6 @@ geneOrder <- order(geneInfo0$moduleColor, -abs(geneInfo0$GS.niareagansc_recode))
 geneInfo <- geneInfo0[geneOrder, ]
 
 geneInfo
-write.csv(geneInfo, file = "./cpg_assignment_PFC.csv")
 
 # -----------------------------------------------------------------------------
 # STEP 11 (Optional): Hub CpG enrichment using TOM
