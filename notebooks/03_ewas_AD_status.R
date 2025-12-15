@@ -302,16 +302,9 @@ volcano_plot <- ggplot(results_niareagansc_recode_all, aes(x = logFC, y = -log10
 volcano_plot
 ggsave("Volcano_Plot_PFC.pdf", plot = volcano_plot, width = 10, height = 6, units = "in", dpi = 300)
 
-# -----------------------------------------------------------------------------
-# STEP 13: Feature selection export (kept)
-# -----------------------------------------------------------------------------
-write.csv(
-  data.frame(APOE_TRUE_only = rownames(results_niareagansc_recode_all[results_niareagansc_recode_all$P.Value < 0.05, ])),
-  "~/Desktop/research/ROSMAP/DNAme/feature_selection/niareagansc_recode_cpgs_PFC.csv"
-)
 
 # -----------------------------------------------------------------------------
-# STEP 14: Optional APOE+ subgroup EWAS (kept structure)
+# STEP 13: Optional APOE+ subgroup EWAS (kept structure)
 # -----------------------------------------------------------------------------
 big_pheno_APOE <- big_pheno_scaled[big_pheno_scaled$apoe_genotype == TRUE, ]
 
@@ -351,7 +344,7 @@ results_niareagansc_recode_APOE <- results_niareagansc_recode_APOE[results_niare
 cpg_niareagansc_recode_APOE <- rownames(results_niareagansc_recode_APOE)
 
 # -----------------------------------------------------------------------------
-# STEP 15: Optional APOE interaction scan (logistic regression per CpG)
+# STEP 14: Optional APOE interaction scan (logistic regression per CpG)
 # -----------------------------------------------------------------------------
 # Prepare statuses (kept)
 big_pheno_all$AD_status <- as.factor(big_pheno_all$niareagansc_recode)
@@ -431,13 +424,10 @@ combined_results <- combined_results %>%
     })
   )
 
-write.csv(
-  combined_results,
-  "~/Desktop/research/ROSMAP/DNAme/feature_selection/niareagansc_recode_cpgs_PFC_significant.csv"
-)
+
 
 # -----------------------------------------------------------------------------
-# STEP 16: Enrichment (gometh / KEGG) (kept thresholds)
+# STEP 15: Enrichment (gometh / KEGG) (kept thresholds)
 # -----------------------------------------------------------------------------
 gst <- gometh(
   sig.cpg = results_niareagansc_recode_all[results_niareagansc_recode_all$adj.P.Val < 0.06, ]$Name,
@@ -455,7 +445,7 @@ gst <- gometh(
 topGSA(gst[gst$P.DE < 0.05, ])
 
 # -----------------------------------------------------------------------------
-# STEP 17: DMRcate region analysis + region enrichment (kept)
+# STEP 16: DMRcate region analysis + region enrichment (kept)
 # -----------------------------------------------------------------------------
 myAnnotationAPOE <- cpg.annotate(
   object = t(DNAm_all),
@@ -488,7 +478,7 @@ gst <- goregion(
 topGSA(gst[gst$P.DE < 0.05, ], num = Inf)
 
 # -----------------------------------------------------------------------------
-# STEP 18: Venn diagram across region CpG lists
+# STEP 17: Venn diagram across region CpG lists
 # -----------------------------------------------------------------------------
 # NOTE: Your original code read PFC twice and labeled it twice.
 # If that duplication was intentional for presentation, revert to the original.
