@@ -81,12 +81,13 @@ In subjects with complete data for proteomics, DNAme, and PRS:
 
 ```text
 .
-├── README.md                # This file
+├── README.md                # Project overview and entry point
 ├── docs/                    # High-level project and methods documentation
 │   ├── README.md            # Overview, methods, and FAQs
 │   ├── data_overview.md     # Data types, cohorts, and key variables
-│   ├── methods_summary.md   # Condensed methods (with refs to full paper)
-│   └── authors_and_contributions.md
+│   ├── results_summary.md   # High-level summary of main results
+│   ├── code_guide.md        # Guide mapping analyses to scripts 
+│   └── methods_summary.md   # Condensed methods description
 ├── notebooks/
 │   ├── 01_pheno_exploration_and_heatmaps.R
 │   ├── 02_epigenetic_biomarker_associations.R
@@ -99,7 +100,14 @@ In subjects with complete data for proteomics, DNAme, and PRS:
 │   ├── 21_protein_interactions_and_mediation.R
 │   ├── 30_prs_associations_and_modeling.R
 │   └── 40_multiomic_integration_and_final_analyses.R
-├── WES_pipeline/            
+├── WES_pipeline/
+│   ├── config/
+│   │   ├── hg19_idt_target_regions.bed
+│   │   ├── hg19_idt_and_spikein_regions.bed
+│   │   ├── hg19_spikein_regions.bed
+│   │   ├── hg38_idt_and_spikein_regions.bed
+│   │   ├── hg38_idt_target_regions.bed
+│   │   └── hg38_spikein_regions.bed
 │   ├── 00_download_fastq.sh
 │   ├── 01_fix_sample_names_and_paths.sh
 │   ├── 02_merge_lanes_fastq.sh
@@ -124,12 +132,4 @@ In subjects with complete data for proteomics, DNAme, and PRS:
 │   ├── 21_snpsift_genesets.sh
 │   ├── 22_bgzip_and_tabix_vcfs.sh
 │   ├── 23_merge_sample_vcfs.sh
-│   └── readme_WES_pipeline.md            
-├── config/
-│   ├── sample_manifest.csv  # Sample IDs, APOE genotype, AD status, etc.
-│   ├── proteomics_featureset.csv
-│   ├── DNAm_featureset.csv
-│   └── prs_metadata.csv
-└── figures/
-    ├── main_figures/        # Final figures used in the manuscript
-    └── exploratory/         # Intermediate / exploratory plots
+│   └── readme_WES_pipeline.md
