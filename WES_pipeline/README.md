@@ -1,7 +1,7 @@
 # WES_pipeline (Slurm + DSQ workflow)
 
 This folder contains scripts for whole-exome sequencing (WES) preprocessing and
-analysis on the Yale HPC cluster.
+analysis on the Yale HPC cluster. All paths are cluster-specific and provided for documentation; users should adapt paths and module names to their local environment.
 
 ---
 
