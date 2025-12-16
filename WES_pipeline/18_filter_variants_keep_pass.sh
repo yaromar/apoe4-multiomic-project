@@ -1,5 +1,5 @@
 #!/bin/bash
-# 18_filter_mutect_calls.sh
+# 18_filter_variants_keep_pass.sh
 #
 # Purpose:
 #   Create a “cleaned” VCF by removing variants that failed Mutect2 filtering
