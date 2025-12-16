@@ -120,9 +120,10 @@ In subjects with complete data for proteomics, DNAme, and PRS:
 │   ├── 17_learn_read_orientation_and_sort_vcf_and_filter_mutect_calls.sh
 │   ├── 18_filter_variants_keep_pass.sh
 │   ├── 19_snpeff_annotation.sh
-│   ├── 20_snpsift_annot_and_genesets.sh
-│   ├── 21_bgzip_and_tabix_vcfs.sh
-│   ├── 22_merge_sample_vcfs.sh
+│   ├── 20_snpsift_annotate_dbsnp_clinvar_gwas.sh
+│   ├── 21_snpsift_genesets.sh
+│   ├── 22_bgzip_and_tabix_vcfs.sh
+│   ├── 23_merge_sample_vcfs.sh
 │   └── readme_WES_pipeline.md            
 ├── config/
 │   ├── sample_manifest.csv  # Sample IDs, APOE genotype, AD status, etc.
