@@ -3,7 +3,7 @@
 **Lead author:** Yaroslav Markov  
 **Primary affiliation (at time of work):** Yale University  
 
-This repository contains code, minimal documentation, and analysis notebooks for a multi-omic study of APOEε4-associated proteomic and DNA methylation changes in Alzheimer disease using post-mortem human brain tissue.
+This repository contains code, documentation, and analysis scipts for a multi-omic study of APOEε4-associated proteomic and DNA methylation changes in Alzheimer disease using post-mortem human brain tissue.
 
 ---
 
@@ -36,7 +36,7 @@ We model:
 
 ---
 
-## Core Findings (Short Summary)
+## Core Findings 
 
 ### 1. Biphasic model of APOEε4-driven pathology
 
@@ -76,6 +76,31 @@ In subjects with complete data for proteomics, DNAme, and PRS:
 - In **non-carriers**, PRS performs best for AD classification (AUC ≈ 0.73).  
 - In **carriers**, **proteomic and DNA methylation markers** outperform PRS (AUC up to ≈ 0.74).
 
+---
+
+## Data locations (for Albert Higgins-Chen lab)
+
+> **Note:** These data are **not included** in this public repository. The paths below are **internal pointers** for authorized Higgins-Chen lab members.
+
+1. **DNA methylation (EPIC array)**  
+   Google Drive:  
+   `4_Research Resources -> Datasets -> ROSMAP -> Methylation`
+
+2. **Proteomics (raw + processed)**  
+   Google Drive:  
+   `4_Research Resources -> Datasets -> ROSMAP -> Proteomics -> Proteomics MultiRegion`
+
+3. **Whole-exome sequencing (WES)**  
+   - **Raw FASTQs:** download from Yale storage tape using:  
+     `WES_pipeline/00_download_fastq.sh`  
+   - **Processed WES + related files:** Google Drive:  
+     `4_Research Resources -> Datasets -> ROSMAP -> WES`
+
+4. **Polygenic risk scores (PRS)**  
+   Google Drive:  
+   `4_Research Resources -> Datasets -> ROSMAP -> PRS`
+
+---
 
 ## Repository Structure
 
