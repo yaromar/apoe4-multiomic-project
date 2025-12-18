@@ -114,7 +114,7 @@ Y_controls <- Y_controls[present_samples, , drop = FALSE]
 missing_percent <- colSums(is.na(Y_proteins)) / nrow(Y_proteins)
 
 # adjust the threshold
-threshold_missing <- 
+threshold_missing <- 0.99
 keep_features <- names(missing_percent)[missing_percent < threshold_missing]
 Y_proteins <- Y_proteins[, keep_features, drop = FALSE]
 missing_percent <- missing_percent[keep_features]
@@ -176,8 +176,8 @@ X_ruv <- model.matrix(~ niareagansc + Female + Age + apoe_long, data = pheno_sub
 
 Y_ruv <- t(log2(Y_combined + 1))
 
-# Choose k (max is the number of negative controls)
-k <-   
+# Choose k 
+k <- 13 # eg max is the number of negative controls; adjust
 ruv4_results <- RUV4(Y = Y_ruv, X = X_ruv, ctl = ctl, k = k, Z = NULL)
 
 # Adjusted Y (features x samples)
