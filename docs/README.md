@@ -44,8 +44,7 @@ This repo contains analysis notebooks for:
   - AD PRS derived from genotype data using published GWAS weights
 
 - **Neuropathology and cognitive phenotypes:**
-  - CERAD and Braak summaries
-  - Additional phenotypes used in stratified and interaction models
+  - CERAD, Braak, NIA-Reagan 
 
 
 ---
@@ -61,7 +60,7 @@ The analysis is organized around four core questions:
    (Mediation models on prioritized proteins and CpG sites)
 
 3. **How do candidate features relate to neuropathology severity?**  
-   (Associations with CERAD and Braak)
+   (Associations with CERAD, Braak, NIA-Reagan)
 
 4. **Do different modalities predict AD differently by APOE genotype?**  
    (Predictive models stratified by APOE ε4 status across proteomics, methylation, and PRS)
@@ -92,10 +91,10 @@ Predictive modeling suggests **PRS performs better in non-carriers**, while **no
 - `README.md` (repo entry point)
 - `docs/README.md` (this file: study overview + FAQs)
 - `docs/data_overview.md` (what data exist, key variables, cohort structure)
-- `docs/methods_summary.md` (paper-aligned methods snapshot)
+- `docs/methods_summary.md` (methods snapshot)
 - `docs/results_summary.md` (narrative results + pointers to analyses)
 
-### Analysis notebooks
+### Analysis scripts
 Notebooks in `notebooks/` are numbered to reflect the typical analysis flow:
 - phenotype exploration → DNAm/proteomics preprocessing → interaction + mediation → PRS → multi-omic integration
 
