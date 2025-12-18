@@ -157,7 +157,6 @@ run_mediation_parallel <- function(cpg_list, sims = 1000, ncores = max(1, detect
 }
 
 # Example: run on a subset — e.g., significant CpGs list:
-# cpgs_to_test <- DNAme_results$Name[DNAme_results$adj.P.Val < ] # adjust the p value
 # mediation_results <- run_mediation_parallel(cpgs_to_test, sims = 1000)
 
 extract_mediation_table <- function(med_list, p_cut = 0.10) {
