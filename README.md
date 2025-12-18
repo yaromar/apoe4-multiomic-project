@@ -31,7 +31,7 @@ We model:
 
 - APOEε4 × AD interactions at the protein and CpG level  
 - Mediation of APOEε4 → AD by selected proteins and CpG sites  
-- Associations with neuropathology (CERAD, Braak) and polygenic risk scores (PRS)  
+- Associations with neuropathology (CERAD, Braak, NIA-Reagan) and polygenic risk scores (PRS)  
 - Predictive performance of proteomic / epigenetic / PRS features stratified by APOEε4 status  
 
 ---
