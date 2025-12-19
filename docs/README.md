@@ -91,7 +91,6 @@ Predictive modeling suggests **PRS performs better in non-carriers**, while **no
 - `docs/README.md` (this file: study overview + FAQs)
 - `docs/data_overview.md` (what data exist, key variables, cohort structure)
 - `docs/methods_summary.md` (methods snapshot)
-- `docs/results_summary.md` (narrative results + pointers to analyses)
 
 ### Analysis scripts
 Notebooks in `notebooks/` are numbered to reflect the typical analysis flow:
