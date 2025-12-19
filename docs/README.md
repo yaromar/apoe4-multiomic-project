@@ -2,7 +2,6 @@
 
 This repository documents a multi-omic study of **APOE ε4–specific molecular mechanisms in Alzheimer’s disease (AD)** using post-mortem **prefrontal cortex (PFC)** brain tissue from **ROSMAP**. The goal is to provide a clear, reusable, notebook-style record of motivation, study design, analyses, and results **without distributing sensitive raw data**.
 
-This repo is designed for **transparency and reuse** (clear methods + analysis patterns).
 
 ---
 
