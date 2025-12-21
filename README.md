@@ -110,8 +110,6 @@ In subjects with complete data for proteomics, DNAme, and PRS:
 ├── docs/                    # High-level project and methods documentation
 │   ├── README.md            # Overview, methods, and FAQs
 │   ├── data_overview.md     # Data types, cohorts, and key variables
-│   ├── results_summary.md   # High-level summary of main results
-│   ├── code_guide.md        # Guide mapping analyses to scripts 
 │   └── methods_summary.md   # Condensed methods description
 ├── notebooks/
 │   ├── 01_pheno_exploration_and_heatmaps.R
